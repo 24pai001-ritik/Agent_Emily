@@ -52,6 +52,11 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
   const [regeneratingScriptId, setRegeneratingScriptId] = useState(null);
   const [regeneratingScriptVersion, setRegeneratingScriptVersion] = useState(null);
   
+  // Preview and edit state
+  const [showEditInput, setShowEditInput] = useState(false);
+  const [editPrompt, setEditPrompt] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+  
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const carouselFileInputRef = useRef(null);
@@ -92,6 +97,13 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
   
   // Auto-cleanup duplicate content review messages when in confirm_content step
   // This useEffect provides a safety net to catch any duplicates that might slip through
+  // Debug: Log when currentStep changes to select_schedule
+  useEffect(() => {
+    if (currentStep === 'select_schedule') {
+      console.log('🎯 Schedule UI should be visible now - currentStep:', currentStep);
+    }
+  }, [currentStep]);
+
   useEffect(() => {
     if (currentStep === 'confirm_content') {
       setMessages(prev => {
@@ -560,6 +572,14 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
       setProgress(data.progress_percentage);
       setState(data.state || {});
       
+      // Debug: Log current step for schedule detection
+      if (data.current_step === 'select_schedule') {
+        console.log('✅ Schedule step detected, should show schedule UI');
+        console.log('📋 Current step:', data.current_step);
+        console.log('📋 Messages length:', messages.length);
+        console.log('📋 CurrentStep state:', currentStep);
+      }
+      
       // Auto-cleanup duplicate content review messages when in confirm_content step
       // This provides a safety net even if backend sends duplicates
       if (data.current_step === 'confirm_content') {
@@ -689,6 +709,8 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
       if (data.current_step === 'generate_content' || 
           data.current_step === 'parse_content' || 
           data.current_step === 'optimize_content' ||
+          data.current_step === 'edit_image' ||
+          data.current_step === 'preview_and_edit' ||
           data.current_step === 'confirm_content' ||
           data.current_step === 'select_schedule' ||
           data.current_step === 'save_content') {
@@ -696,12 +718,27 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
         setShowCarouselUpload(false);
       }
 
-      // Check if conversation is complete
+      // Handle preview_and_edit step
+      if (data.current_step === 'preview_and_edit') {
+        setShowEditInput(false);
+        setIsEditing(false);
+      }
+      
+      // Handle edit_image step
+      if (data.current_step === 'edit_image') {
+        setShowEditInput(false);
+        setIsEditing(false);
+      }
+
+      // Check if conversation is complete - close modal
       if (data.state?.is_complete) {
+        console.log('✅ Conversation complete, closing modal');
+        // Call onContentCreated callback if provided
+        onContentCreated?.(data.state.final_post);
+        // Close the modal after a short delay to show the final message
         setTimeout(() => {
-          onContentCreated?.(data.state.final_post);
           onClose();
-        }, 2000);
+        }, 1500);
       }
 
     } catch (error) {
@@ -1436,11 +1473,38 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
   };
 
   const handleOptionClick = (value, label) => {
+    // Handle image editing options (only "use_as_is" and "edit_with_leo" now)
+    if (value === 'use_as_is' || value === 'edit_with_leo') {
+      setInputValue(label);
+      sendMessage(value);
+      return;
+    }
+    
     // Handle carousel image source selection
     if (value === 'ai_generate' || value === 'manual_upload') {
       if (value === 'manual_upload') {
         setShowCarouselUpload(true);
       }
+      setInputValue(label);
+      sendMessage(value);
+      return;
+    }
+    
+    // Handle thumbnail selection options
+    if (value === 'upload_thumbnail' || value === 'generate_thumbnail' || value === 'auto_extract') {
+      // Show media upload UI for thumbnail upload
+      if (value === 'upload_thumbnail') {
+        setShowMediaUpload(true);
+        setMediaType('image'); // Thumbnails are images
+        setUploadError(null);
+      } else {
+        setShowMediaUpload(false);
+        setMediaType(null);
+      }
+      setUploadedFile(null);
+      setMediaPreview(null);
+      
+      // Send the value to backend
       setInputValue(label);
       sendMessage(value);
       return;
@@ -1499,13 +1563,37 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
   };
 
   const handleAnotherContentChoice = (choice) => {
-    if (choice === 'yes') {
-      // Refresh the chatbot to start new content generation
-      refreshConversation();
-    } else {
-      // Exit the chatbot
-      onClose();
+    // Send the choice to backend instead of directly refreshing/closing
+    setInputValue(choice === 'yes' ? 'Create another post' : "I'm done for now");
+    sendMessage(choice === 'yes' ? 'yes' : 'No');
+  };
+
+  const handlePreviewAction = (action) => {
+    if (action === 'proceed') {
+      setInputValue('Looks good, proceed to schedule');
+      sendMessage('proceed');
+    } else if (action === 'edit') {
+      setShowEditInput(true);
+      setEditPrompt('');
     }
+  };
+
+  const handleEditSubmit = () => {
+    if (!editPrompt.trim()) {
+      return;
+    }
+    setIsEditing(true);
+    setInputValue(editPrompt);
+    sendMessage(editPrompt);
+    setShowEditInput(false);
+    setEditPrompt('');
+    // Reset editing state after a delay
+    setTimeout(() => setIsEditing(false), 2000);
+  };
+
+  const handleVersionSwitch = (versionNumber) => {
+    setInputValue(`switch to version ${versionNumber}`);
+    sendMessage(`switch_version:${versionNumber}`);
   };
 
   const handleScheduleSelection = (type) => {
@@ -1721,7 +1809,9 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
       case 'ask_description': return '💭';
       case 'ask_media': return '🎨';
       case 'confirm_media': return '👀';
+      case 'ask_thumbnail': return '🖼️';
       case 'generate_content': return '✨';
+      case 'preview_and_edit': return '👁️';
       case 'confirm_content': return '✅';
       case 'select_schedule': return '📅';
       case 'save_content': return '💾';
@@ -1738,7 +1828,10 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
       case 'ask_description': return 'Describe content';
       case 'ask_media': return 'Add media';
       case 'confirm_media': return 'Confirm media';
+      case 'ask_thumbnail': return 'Select thumbnail';
+      case 'edit_image': return 'Edit Image';
       case 'generate_content': return 'Generating content';
+      case 'preview_and_edit': return 'Preview & Edit';
       case 'confirm_content': return 'Confirm content';
       case 'select_schedule': return 'Select schedule';
       case 'save_content': return 'Saving content';
@@ -1846,6 +1939,30 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
                       })}
                     </div>
                     
+                    {/* Show editing options if available */}
+                    {message.show_editing_options && message.editing_options && Array.isArray(message.editing_options) && message.editing_options.length > 0 && (
+                      <div className="mt-4 p-4 bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl border border-purple-200">
+                        <div className="text-sm font-semibold text-purple-800 mb-3">
+                          Edit your images:
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {message.editing_options.map((option, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => {
+                                // Handle editing option selection
+                                setInputValue(option.label);
+                                sendMessage(option.value);
+                              }}
+                              className="px-3 py-2 bg-white border border-purple-200 rounded-lg hover:border-purple-400 hover:bg-purple-50 transition-all duration-200 text-xs font-medium text-gray-700 text-left"
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
                     {/* Show approval buttons if in approval step and this is the most recent assistant message */}
                     {currentStep === 'approve_carousel_images' && 
                      !isGeneratingCarouselImage &&
@@ -1854,7 +1971,7 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
                      message.id === messages.filter(m => m.role === 'assistant').slice(-1)[0]?.id && (
                       <div className="mt-4 flex flex-col gap-2">
                         {/* Show completion text above buttons if message content contains it */}
-                        {message.content && message.content.includes("Perfect! I've generated all 4 carousel images") && (
+                        {message.content && (message.content.includes("Perfect! I've generated") || message.content.includes("carousel image")) && (
                           <div className="text-sm text-gray-700 mb-3 px-2">
                             {message.content}
                           </div>
@@ -2201,8 +2318,8 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
                   </div>
                 )}
                 
-                {/* Show uploaded media for other messages (not content review) */}
-                {message.media_url && (!message.content || !message.content.includes('Content Review')) && (
+                {/* Show uploaded media for other messages (not content review and not preview mode) */}
+                {message.media_url && (!message.content || !message.content.includes('Content Review')) && !message.preview_mode && (
                   <div className="mt-4">
                     {message.media_type?.startsWith('image') ? (
                       <img 
@@ -2220,8 +2337,173 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
                   </div>
                 )}
                 
+                {/* Show video preview for thumbnail selection */}
+                {currentStep === 'ask_thumbnail' && message.video_url && (
+                  <div className="mt-4 mb-4">
+                    <video 
+                      src={message.video_url} 
+                      controls 
+                      className="max-w-full h-64 object-cover rounded-xl border border-purple-200 shadow-lg"
+                    />
+                  </div>
+                )}
+                
+                {/* Preview and Edit Mode */}
+                {message.preview_mode && message.current_content && (
+                  <div className="mt-6 space-y-4">
+                    {/* Version Info - Only show if multiple versions exist */}
+                    {(message.total_versions && message.total_versions > 1) && (
+                      <div className="flex items-center justify-between text-sm text-purple-600 font-medium">
+                        <span>Version {message.current_version || 1} of {message.total_versions || 1}</span>
+                        <span className="text-xs text-gray-500">Click a version below to switch</span>
+                      </div>
+                    )}
+
+                    {/* Current Content Preview */}
+                    <div className="bg-gradient-to-br from-white to-purple-50 rounded-xl border-2 border-purple-200 p-6 shadow-lg">
+                      <div className="space-y-4">
+                        {/* Image Preview for Image Post */}
+                        {(message.image_post || message.current_content?.type === 'image_post') && message.media_url && (
+                          <div className="mb-4">
+                            <img 
+                              src={message.media_url} 
+                              alt="Post preview" 
+                              className="w-full max-w-md mx-auto rounded-xl border-2 border-purple-300 shadow-lg object-cover"
+                            />
+                          </div>
+                        )}
+                        
+                        {message.current_content.title && (
+                          <h3 className="text-xl font-bold text-purple-800">{message.current_content.title}</h3>
+                        )}
+                        
+                        {/* For Image Post, show caption instead of content */}
+                        {message.current_content.caption ? (
+                          <div className="text-gray-700 whitespace-pre-wrap leading-relaxed text-lg">
+                            {message.current_content.caption}
+                          </div>
+                        ) : message.current_content.content && (
+                          <div className="text-gray-700 whitespace-pre-wrap leading-relaxed">
+                            {message.current_content.content}
+                          </div>
+                        )}
+                        
+                        {message.current_content.hashtags && message.current_content.hashtags.length > 0 && (
+                          <div className="flex flex-wrap gap-2">
+                            {message.current_content.hashtags.map((tag, idx) => (
+                              <span key={idx} className="px-2 py-1 bg-purple-100 text-purple-700 rounded-md text-sm">
+                                #{tag.replace('#', '')}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {message.current_content.call_to_action && (
+                          <div className="pt-2 border-t border-purple-200">
+                            <p className="text-sm font-semibold text-purple-700">Call to Action:</p>
+                            <p className="text-gray-700">{message.current_content.call_to_action}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Version Comparison - Show if multiple versions exist */}
+                    {message.content_history && message.content_history.length > 1 && (
+                      <div className="bg-blue-50 rounded-xl border border-blue-200 p-4">
+                        <div className="text-sm font-semibold text-blue-800 mb-3">Version History (Click to switch):</div>
+                        <div className="space-y-2 max-h-40 overflow-y-auto">
+                          {message.content_history.slice(-5).reverse().map((version, idx) => (
+                            <button
+                              key={version.version}
+                              onClick={() => handleVersionSwitch(version.version)}
+                              className={`w-full text-left p-3 rounded-lg text-xs transition-all duration-200 ${
+                                version.is_current 
+                                  ? 'bg-purple-100 border-2 border-purple-400 shadow-md cursor-default' 
+                                  : 'bg-white border border-blue-200 hover:bg-blue-100 hover:border-blue-300 cursor-pointer'
+                              }`}
+                              disabled={version.is_current}
+                            >
+                              <div className="flex justify-between items-center">
+                                <span className={`font-medium ${version.is_current ? 'text-purple-800' : 'text-gray-700'}`}>
+                                  Version {version.version} {version.is_current && '✓ (Current)'}
+                                </span>
+                                {version.edit_prompt && (
+                                  <span className="text-gray-500 italic text-xs">"{version.edit_prompt.substring(0, 30)}..."</span>
+                                )}
+                              </div>
+                              {version.timestamp && (
+                                <div className="text-xs text-gray-400 mt-1">
+                                  {new Date(version.timestamp).toLocaleTimeString()}
+                                </div>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Edit Input Field */}
+                    {showEditInput && (
+                      <div className="bg-gradient-to-br from-yellow-50 to-orange-50 rounded-xl border-2 border-orange-200 p-4">
+                        <div className="text-sm font-semibold text-orange-800 mb-2">
+                          Describe your edit (e.g., "Make the caption more professional", "Change background to dark", "Add stronger CTA"):
+                        </div>
+                        <textarea
+                          value={editPrompt}
+                          onChange={(e) => setEditPrompt(e.target.value)}
+                          placeholder="Enter your edit request..."
+                          className="w-full p-3 border border-orange-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400 text-sm"
+                          rows={3}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && e.ctrlKey) {
+                              handleEditSubmit();
+                            }
+                          }}
+                        />
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            onClick={handleEditSubmit}
+                            disabled={!editPrompt.trim() || isEditing}
+                            className="px-4 py-2 bg-gradient-to-r from-orange-400 to-red-500 text-white rounded-lg hover:from-orange-500 hover:to-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 text-sm font-semibold"
+                          >
+                            {isEditing ? 'Applying...' : 'Apply Edit'}
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShowEditInput(false);
+                              setEditPrompt('');
+                            }}
+                            className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all duration-200 text-sm font-semibold"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+
+                    {/* Action Buttons */}
+                    {!showEditInput && (
+                      <div className="flex gap-3">
+                        {message.options && message.options.map((option, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => handlePreviewAction(option.value)}
+                            className={`flex-1 px-6 py-3 rounded-xl transition-all duration-200 text-sm font-semibold shadow-lg hover:shadow-xl ${
+                              option.value === 'proceed'
+                                ? 'bg-gradient-to-r from-green-400 to-blue-500 text-white hover:from-green-500 hover:to-blue-600'
+                                : 'bg-gradient-to-r from-purple-400 to-pink-500 text-white hover:from-purple-500 hover:to-pink-600'
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Platform Options */}
-                {message.role === 'assistant' && message.options && message.options.length > 0 && !showMediaUpload && (
+                {message.role === 'assistant' && message.options && message.options.length > 0 && !showMediaUpload && !message.preview_mode && (
                   <div className="mt-4">
                     <div className="grid grid-cols-2 gap-3">
                       {message.options.map((option, index) => (
@@ -2485,62 +2767,47 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
                 )}
 
                 {/* Another Content Generation Options */}
-                {message.role === 'assistant' && message.content && message.content.includes('create another piece of content') && (
+                {message.role === 'assistant' && message.content && (
+                  message.content.includes('create another piece of content') || 
+                  message.content.includes('Want to explore another idea with Leo') ||
+                  message.content.includes('leave it here') ||
+                  message.content.includes('Your post has been saved to the schedule section') ||
+                  message.content.includes('Want to create another post or are you done for now')
+                ) && (
                   <div className="mt-6">
-                    <div className="flex gap-4 justify-center">
-                      <button
-                        onClick={() => handleAnotherContentChoice('yes')}
-                        className="px-8 py-4 bg-gradient-to-r from-purple-400 to-pink-500 text-white rounded-xl hover:from-purple-500 hover:to-pink-600 transition-all duration-200 text-base font-semibold shadow-lg hover:shadow-xl"
-                      >
-                        Yes, create another
-                      </button>
-                      <button
-                        onClick={() => handleAnotherContentChoice('no')}
-                        className="px-8 py-4 bg-gradient-to-r from-gray-400 to-gray-500 text-white rounded-xl hover:from-gray-500 hover:to-gray-600 transition-all duration-200 text-base font-semibold shadow-lg hover:shadow-xl"
-                      >
-                        No, I'm done
-                      </button>
-                    </div>
-                  </div>
-                )}
-                
-                {/* Schedule Selection */}
-                {message.role === 'assistant' && message.content && message.content.includes('schedule your post') && (
-                  <div className="mt-4 p-5 bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl border border-purple-200 shadow-sm">
-                    <div className="space-y-5">
-                      <div className="text-sm font-bold text-purple-800">Select Post Schedule:</div>
-                      
-                      <div className="grid grid-cols-1 gap-4">
-                        <button
-                          onClick={() => handleScheduleSelection('now')}
-                          className="px-6 py-3 bg-gradient-to-r from-green-400 to-blue-500 text-white rounded-xl hover:from-green-500 hover:to-blue-600 transition-all duration-200 text-sm font-semibold shadow-lg hover:shadow-xl"
-                        >
-                          🚀 Post Now
-                        </button>
-                        
-                        <div className="space-y-3">
-                          <label className="text-sm font-bold text-purple-800">Or schedule for later:</label>
-                          <div className="flex gap-3">
-                            <input
-                              type="date"
-                              ref={dateInputRef}
-                              className="flex-1 px-4 py-3 border border-purple-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-400 focus:border-pink-400 text-sm bg-white shadow-sm"
-                            />
-                            <input
-                              type="time"
-                              ref={timeInputRef}
-                              className="flex-1 px-4 py-3 border border-purple-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-400 focus:border-pink-400 text-sm bg-white shadow-sm"
-                            />
-                          </div>
+                    {/* Use options from backend if available, otherwise use default buttons */}
+                    {message.options && Array.isArray(message.options) && message.options.length > 0 ? (
+                      <div className="flex gap-4 justify-center">
+                        {message.options.map((option, idx) => (
                           <button
-                            onClick={() => handleScheduleSelection('custom')}
-                            className="w-full px-6 py-3 bg-gradient-to-r from-pink-400 to-purple-500 text-white rounded-xl hover:from-pink-500 hover:to-purple-600 transition-all duration-200 text-sm font-semibold shadow-lg hover:shadow-xl"
+                            key={idx}
+                            onClick={() => handleAnotherContentChoice(option.value === 'yes' || option.value === 'Create another post' ? 'yes' : 'no')}
+                            className={`px-8 py-4 text-white rounded-xl transition-all duration-200 text-base font-semibold shadow-lg hover:shadow-xl ${
+                              option.value === 'yes' || option.value === 'Create another post'
+                                ? 'bg-gradient-to-r from-purple-400 to-pink-500 hover:from-purple-500 hover:to-pink-600'
+                                : 'bg-gradient-to-r from-gray-400 to-gray-500 hover:from-gray-500 hover:to-gray-600'
+                            }`}
                           >
-                            📅 Schedule Post
+                            {option.label}
                           </button>
-                        </div>
+                        ))}
                       </div>
-                    </div>
+                    ) : (
+                      <div className="flex gap-4 justify-center">
+                        <button
+                          onClick={() => handleAnotherContentChoice('yes')}
+                          className="px-8 py-4 bg-gradient-to-r from-purple-400 to-pink-500 text-white rounded-xl hover:from-purple-500 hover:to-pink-600 transition-all duration-200 text-base font-semibold shadow-lg hover:shadow-xl"
+                        >
+                          Create another post
+                        </button>
+                        <button
+                          onClick={() => handleAnotherContentChoice('no')}
+                          className="px-8 py-4 bg-gradient-to-r from-gray-400 to-gray-500 text-white rounded-xl hover:from-gray-500 hover:to-gray-600 transition-all duration-200 text-base font-semibold shadow-lg hover:shadow-xl"
+                        >
+                          I'm done for now
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
                 
@@ -2554,6 +2821,39 @@ const CustomContentChatbot = ({ isOpen, onClose, onContentCreated }) => {
           ))}
           
           {/* Content cards removed - content is now displayed directly in chatbot messages */}
+          
+          {/* Schedule Selection UI - Show when currentStep is select_schedule */}
+          {currentStep === 'select_schedule' && (
+            <div key="schedule-ui-single" className="mb-4 p-5 bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl border border-purple-200 shadow-sm">
+              <div className="space-y-5">
+                <div className="text-sm font-bold text-purple-800">Select Post Schedule:</div>
+                
+                <div className="grid grid-cols-1 gap-4">
+                  <div className="space-y-3">
+                    <label className="text-sm font-bold text-purple-800">Schedule your post:</label>
+                    <div className="flex gap-3">
+                      <input
+                        type="date"
+                        ref={dateInputRef}
+                        className="flex-1 px-4 py-3 border border-purple-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-400 focus:border-pink-400 text-sm bg-white shadow-sm"
+                      />
+                      <input
+                        type="time"
+                        ref={timeInputRef}
+                        className="flex-1 px-4 py-3 border border-purple-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-400 focus:border-pink-400 text-sm bg-white shadow-sm"
+                      />
+                    </div>
+                    <button
+                      onClick={() => handleScheduleSelection('custom')}
+                      className="w-full px-6 py-3 bg-gradient-to-r from-pink-400 to-purple-500 text-white rounded-xl hover:from-pink-500 hover:to-purple-600 transition-all duration-200 text-sm font-semibold shadow-lg hover:shadow-xl"
+                    >
+                      📅 Schedule Post
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           
           {isLoading && (
             <div className="flex justify-start">

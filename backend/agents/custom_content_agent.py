@@ -67,13 +67,12 @@ class ConversationStep(str, Enum):
     ASK_PLATFORM = "ask_platform"
     ASK_CONTENT_TYPE = "ask_content_type"
     ASK_DESCRIPTION = "ask_description"
-    ASK_CLARIFICATION_1 = "ask_clarification_1"
-    ASK_CLARIFICATION_2 = "ask_clarification_2"
-    ASK_CLARIFICATION_3 = "ask_clarification_3"
     ASK_MEDIA = "ask_media"
     HANDLE_MEDIA = "handle_media"
     VALIDATE_MEDIA = "validate_media"
     CONFIRM_MEDIA = "confirm_media"
+    EDIT_IMAGE = "edit_image"
+    ASK_THUMBNAIL = "ask_thumbnail"
     ASK_CAROUSEL_IMAGE_SOURCE = "ask_carousel_image_source"
     GENERATE_CAROUSEL_IMAGE = "generate_carousel_image"
     APPROVE_CAROUSEL_IMAGES = "approve_carousel_images"
@@ -82,6 +81,7 @@ class ConversationStep(str, Enum):
     GENERATE_SCRIPT = "generate_script"
     CONFIRM_SCRIPT = "confirm_script"
     GENERATE_CONTENT = "generate_content"
+    PREVIEW_AND_EDIT = "preview_and_edit"
     CONFIRM_CONTENT = "confirm_content"
     SELECT_SCHEDULE = "select_schedule"
     SAVE_CONTENT = "save_content"
@@ -124,41 +124,29 @@ class CustomContentState(TypedDict):
     uploaded_carousel_images: Optional[List[str]]  # URLs of uploaded images
     carousel_upload_done: bool  # Whether user confirmed upload is complete
     carousel_theme: Optional[str]  # Overall theme/narrative for sequential carousel images
+    # Preview and edit fields
+    content_history: Optional[List[Dict[str, Any]]]  # History of content versions for undo
+    current_content_version: int  # Current version index in content_history
+    preview_confirmed: Optional[bool]  # Whether user confirmed preview
+    wants_to_edit: Optional[bool]  # Whether user wants to edit
+    edit_prompt: Optional[str]  # Natural language edit prompt from user
+    edited_image_url: Optional[str]  # URL of the last edited image
+    image_edit_type: Optional[str]  # Type of image edit performed
+    use_image_as_is: Optional[bool]  # Flag if user wants to use image as is
+    wants_to_edit_image: Optional[bool]  # Flag if user wants to edit image
+    image_edit_prompt: Optional[str]  # User's natural language image edit prompt
 
 # Platform-specific content types
 PLATFORM_CONTENT_TYPES = {
-    "Facebook": [
-        "Text Post", "Photo", "Video", "Link", "Live Broadcast", 
-        "Carousel", "Story", "Event", "Poll", "Question"
-    ],
-    "Instagram": [
-        "Feed Post", "Story", "Reel", "Carousel"
-    ],
-    "LinkedIn": [
-        "Text Post", "Article", "Video", "Image", "Document", 
-        "Poll", "Event", "Job Posting", "Company Update", "Thought Leadership"
-    ],
-    "Twitter/X": [
-        "Tweet", "Thread", "Image Tweet", "Video Tweet", "Poll", 
-        "Space", "Quote Tweet", "Reply", "Retweet", "Fleets"
-    ],
-    "YouTube": [
-        "Short Video", "Long Form Video", "Live Stream", "Premiere", 
-        "Community Post", "Shorts", "Tutorial", "Review", "Vlog"
-    ],
-    "TikTok": [
-        "Video", "Duet", "Stitch", "Live", "Photo Slideshow", 
-        "Trending Sound", "Original Sound", "Effect Video"
-    ],
-    "Pinterest": [
-        "Pin", "Idea Pin", "Story Pin", "Video Pin", "Shopping Pin", 
-        "Board", "Rich Pin", "Carousel Pin", "Seasonal Pin"
-    ],
-    "WhatsApp Business": [
-        "Text Message", "Image", "Video", "Document", "Audio", 
-        "Location", "Contact", "Sticker", "Template Message"
-    ]
+    "Instagram": ["Image Post", "Reel", "Carousel"],
+    "Facebook": ["Image Post", "Reel", "Text Post", "Carousel"],
+    "YouTube": ["Shorts", "Video"],  # Community Post = manual only
+    "LinkedIn": ["Image Post", "Video", "Text Post", "Carousel"],
+    "Twitter/X": ["Image Post", "Video", "Text Post"],
+    "Reddit": ["Image Post",  "Text Post"],  # No true carousel
+    "Pinterest": ["Video", "Photo"]
 }
+
 
 # Platform-specific media requirements
 PLATFORM_MEDIA_REQUIREMENTS = {
@@ -300,8 +288,11 @@ class CustomContentAgent:
         graph.add_node("handle_media", self.handle_media)
         graph.add_node("validate_media", self.validate_media)
         graph.add_node("confirm_media", self.confirm_media)
+        graph.add_node("ask_thumbnail", self.ask_thumbnail)
         graph.add_node("generate_script", self.generate_script)
         graph.add_node("generate_content", self.generate_content)
+        graph.add_node("edit_image", self.edit_image)
+        graph.add_node("preview_and_edit", self.preview_and_edit)
         graph.add_node("confirm_content", self.confirm_content)
         graph.add_node("select_schedule", self.select_schedule)
         graph.add_node("save_content", self.save_content)
@@ -335,7 +326,6 @@ class CustomContentAgent:
             }
         )
         
-        graph.add_edge("ask_description", "ask_media")
         graph.add_edge("ask_description", "ask_media")
         
         # Conditional edges for media handling
@@ -371,22 +361,30 @@ class CustomContentAgent:
             self._should_proceed_after_media,
             {
                 "proceed": "generate_content",
+                "edit_image": "edit_image",  # For Image Post, offer editing
+                "thumbnail": "ask_thumbnail",
                 "retry": "ask_media",
                 "error": "handle_error"
             }
         )
         
+        # After image editing, proceed to content generation
+        graph.add_edge("edit_image", "generate_content")
         
-        # Content generation flow - skip parse and optimize, go directly to confirm
-        graph.add_edge("generate_content", "confirm_content")
+        # After thumbnail selection, proceed to content generation
+        graph.add_edge("ask_thumbnail", "generate_content")
         
-        # Conditional edge after content confirmation
+        
+        # Content generation flow - go to preview and edit
+        graph.add_edge("generate_content", "preview_and_edit")
+        
+        # Conditional edge after preview and edit
         graph.add_conditional_edges(
-            "confirm_content",
-            self._should_proceed_after_content,
+            "preview_and_edit",
+            self._should_proceed_after_preview,
             {
                 "proceed": "select_schedule",
-                "retry": "ask_description",
+                "edit": "preview_and_edit",  # Stay in preview mode after edit
                 "error": "handle_error"
             }
         )
@@ -449,7 +447,7 @@ class CustomContentAgent:
             
             welcome_message = {
                 "role": "assistant",
-                "content": f"Thanks Emily, I'll take care from here. Hi {business_name}, Leo here! Let's create some amazing content together. Which platform are you thinking about creating content for today?",
+                "content": f"Welcome, {business_name} team!\n\nLeo here — ready to craft powerful, custom content for your social media.\n\nChoose the platform you want to create content for, and let's get started!",
                 "timestamp": datetime.now().isoformat(),
                 "platforms": connected_platforms,
                 "options": platform_options
@@ -580,7 +578,7 @@ class CustomContentAgent:
             
             message = {
                 "role": "assistant",
-                "content": f"Great choice! What's in your mind to post? Describe your idea, key points, or any specific details you want to include:",
+                "content": f"Great choice! Tell me what's in your mind for this {content_type}. Describe your idea, key points, reference styles, or anything specific you'd like included.",
                 "timestamp": datetime.now().isoformat()
             }
             state["conversation_messages"].append(message)
@@ -594,125 +592,21 @@ class CustomContentAgent:
             
         return state
     
-    async def ask_clarification_1(self, state: CustomContentState) -> CustomContentState:
-        """Ask first clarifying question about the post goal"""
-        try:
-            state["current_step"] = ConversationStep.ASK_CLARIFICATION_1
-            state["progress_percentage"] = 40
-            
-            message = {
-                "role": "assistant",
-                "content": "What's the main goal or purpose of this post? (e.g., drive engagement, promote a product/service, share educational content, build brand awareness, or something else?)",
-                "timestamp": datetime.now().isoformat()
-            }
-            state["conversation_messages"].append(message)
-            
-            logger.info("Asked first clarification question about post goal")
-            
-        except Exception as e:
-            logger.error(f"Error in ask_clarification_1: {e}")
-            state["error_message"] = f"Failed to ask clarification: {str(e)}"
-            state["current_step"] = ConversationStep.ERROR
-            
-        return state
-    
-    async def ask_clarification_2(self, state: CustomContentState) -> CustomContentState:
-        """Ask second clarifying question about target audience"""
-        try:
-            state["current_step"] = ConversationStep.ASK_CLARIFICATION_2
-            state["progress_percentage"] = 45
-            
-            message = {
-                "role": "assistant",
-                "content": "Who is your target audience for this post? (e.g., existing customers, new prospects, specific age group, professionals, or a particular demographic?)",
-                "timestamp": datetime.now().isoformat()
-            }
-            state["conversation_messages"].append(message)
-            
-            logger.info("Asked second clarification question about target audience")
-            
-        except Exception as e:
-            logger.error(f"Error in ask_clarification_2: {e}")
-            state["error_message"] = f"Failed to ask clarification: {str(e)}"
-            state["current_step"] = ConversationStep.ERROR
-            
-        return state
-    
-    async def ask_clarification_3(self, state: CustomContentState) -> CustomContentState:
-        """Ask third clarifying question about tone and style"""
-        try:
-            state["current_step"] = ConversationStep.ASK_CLARIFICATION_3
-            state["progress_percentage"] = 50
-            
-            message = {
-                "role": "assistant",
-                "content": "What tone or style should this post have? (e.g., professional and formal, casual and friendly, inspirational and motivational, humorous and light-hearted, or something else?)",
-                "timestamp": datetime.now().isoformat()
-            }
-            state["conversation_messages"].append(message)
-            
-            logger.info("Asked third clarification question about tone and style")
-            
-        except Exception as e:
-            logger.error(f"Error in ask_clarification_3: {e}")
-            state["error_message"] = f"Failed to ask clarification: {str(e)}"
-            state["current_step"] = ConversationStep.ERROR
-            
-        return state
-    
     async def ask_media(self, state: CustomContentState) -> CustomContentState:
-        """Ask user about media preferences"""
+        """Ask user about media preferences - handles Video/Photo/Text logic separately"""
         try:
             state["current_step"] = ConversationStep.ASK_MEDIA
             state["progress_percentage"] = 55
             
             platform = state.get("selected_platform")
-            content_type = state.get("selected_content_type")
+            content_type = state.get("selected_content_type", "")
+            content_type_lower = content_type.lower() if content_type else ""
             
-            # Check if this is a carousel post
-            if content_type and content_type.lower() == "carousel":
-                # Set platform-specific max images
-                if platform and platform.lower() == "facebook":
-                    state["carousel_max_images"] = 10
-                elif platform and platform.lower() == "instagram":
-                    state["carousel_max_images"] = 20
-                else:
-                    state["carousel_max_images"] = 10  # Default
-                
-                # Initialize carousel fields
-                state["carousel_images"] = []
-                state["uploaded_carousel_images"] = []
-                state["current_carousel_index"] = 0
-                state["carousel_upload_done"] = False
-                
-                # Ask for carousel image source
-                state["current_step"] = ConversationStep.ASK_CAROUSEL_IMAGE_SOURCE
-                max_images = state["carousel_max_images"]
-                
+            # 🔵 A. VIDEO CONTENT LOGIC
+            if content_type_lower in ["reel", "shorts", "video"]:
                 message = {
                     "role": "assistant",
-                    "content": f"Great! For your carousel post, how would you like to add images?\n\n• Generate with AI: I'll create up to 4 images for you\n• Upload manually: You can upload up to {max_images} images",
-                    "timestamp": datetime.now().isoformat(),
-                    "options": [
-                        {
-                            "value": "ai_generate",
-                            "label": "🎨 Generate with AI (4 images max)"
-                        },
-                        {
-                            "value": "manual_upload",
-                            "label": f"📤 Upload manually (up to {max_images} images)"
-                        }
-                    ]
-                }
-                state["conversation_messages"].append(message)
-                logger.info(f"Asked user about carousel image source for {platform}")
-                return state
-            
-            # Check if this is a Reel - show only 2 options
-            if content_type and content_type.lower() == "reel":
-                message = {
-                    "role": "assistant",
-                    "content": f"Perfect! For your Instagram Reel, how would you like to proceed?",
+                    "content": f"For your {content_type}, how would you like to proceed?",
                     "timestamp": datetime.now().isoformat(),
                     "options": [
                         {
@@ -721,14 +615,97 @@ class CustomContentAgent:
                         },
                         {
                             "value": "generate_script",
-                            "label": "📝 Let me generate a script for you"
+                            "label": "📝 Let Leo generate a script for you"
+                        },
+                        {
+                            "value": "skip_media",
+                            "label": "➖ Skip video (continue with text-only caption)"
                         }
                     ]
                 }
                 state["conversation_messages"].append(message)
-                logger.info(f"Asked user about Reel media options for {platform}")
+                logger.info(f"Asked user about {content_type} media options for {platform}")
                 return state
             
+            # 🟣 B. PHOTO / CAROUSEL LOGIC
+            if content_type_lower in ["image post", "photo", "carousel"]:
+                # Check if this is a carousel post
+                if content_type_lower == "carousel":
+                    # Set platform-specific max images
+                    if platform and platform.lower() == "facebook":
+                        state["carousel_max_images"] = 10
+                    elif platform and platform.lower() == "instagram":
+                        state["carousel_max_images"] = 20
+                    else:
+                        state["carousel_max_images"] = 10  # Default
+                    
+                    # Initialize carousel fields
+                    state["carousel_images"] = []
+                    state["uploaded_carousel_images"] = []
+                    state["current_carousel_index"] = 0
+                    state["carousel_upload_done"] = False
+                    
+                    # Ask for carousel image source
+                    state["current_step"] = ConversationStep.ASK_CAROUSEL_IMAGE_SOURCE
+                    max_images = state["carousel_max_images"]
+                    
+                    message = {
+                        "role": "assistant",
+                        "content": f"How would you like to add visuals for this post?",
+                        "timestamp": datetime.now().isoformat(),
+                        "options": [
+                            {
+                                "value": "upload_image",
+                                "label": "📸 Upload photo(s)"
+                            },
+                            {
+                                "value": "ai_generate",
+                                "label": "🎨 Let Leo generate images for you"
+                            },
+                            {
+                                "value": "skip_media",
+                                "label": "➖ Create without images"
+                            }
+                        ]
+                    }
+                    state["conversation_messages"].append(message)
+                    logger.info(f"Asked user about carousel image source for {platform}")
+                    return state
+                else:
+                    # Single image post
+                    message = {
+                        "role": "assistant",
+                        "content": f"How would you like to add visuals for this post?",
+                        "timestamp": datetime.now().isoformat(),
+                        "options": [
+                            {
+                                "value": "upload_image",
+                                "label": "📸 Upload photo(s)"
+                            },
+                            {
+                                "value": "generate_image",
+                                "label": "🎨 Let Leo generate images for you"
+                            },
+                            {
+                                "value": "skip_media",
+                                "label": "➖ Create without images"
+                            }
+                        ]
+                    }
+                    state["conversation_messages"].append(message)
+                    logger.info(f"Asked user about {content_type} media options for {platform}")
+                    return state
+            
+            # 🟢 C. TEXT POST LOGIC - Skip media step
+            if content_type_lower == "text post":
+                # Skip media for text posts - go directly to content generation
+                logger.info(f"Skipping media step for {content_type} on {platform}")
+                state["has_media"] = False
+                state["should_generate_media"] = False
+                state["current_step"] = ConversationStep.GENERATE_CONTENT
+                return state
+            
+            # Default fallback for other content types
             # Get media requirements for the platform
             media_reqs = PLATFORM_MEDIA_REQUIREMENTS.get(platform, {})
             
@@ -821,16 +798,38 @@ class CustomContentAgent:
         return state
 
     async def confirm_media(self, state: CustomContentState) -> CustomContentState:
-        """Ask user to confirm if the uploaded media is correct"""
+        """Ask user to confirm if the uploaded media is correct, then route to thumbnail selection for videos"""
         try:
             state["current_step"] = ConversationStep.CONFIRM_MEDIA
             state["progress_percentage"] = 60
             
+            # Check if media is already confirmed - if so, let the graph route handle it
+            if state.get("media_confirmed", False):
+                logger.info("Media already confirmed, letting graph route handle next step")
+                return state
+            
             media_url = state.get("uploaded_media_url")
             media_type = state.get("uploaded_media_type", "")
             media_filename = state.get("uploaded_media_filename", "")
+            uploaded_media_type = state.get("media_type", "")
             
-            # Create a message asking for confirmation
+            # Check if this is a video - route to thumbnail selection after confirmation
+            if uploaded_media_type == MediaType.VIDEO or "video" in media_type.lower():
+                # For videos, after confirmation, ask about thumbnail
+                state["media_confirmed"] = True
+                state["current_step"] = ConversationStep.ASK_THUMBNAIL
+                return await self.ask_thumbnail(state)
+            
+            # Check if we've already asked for confirmation (avoid duplicate messages)
+            last_message = state["conversation_messages"][-1] if state["conversation_messages"] else None
+            confirmation_message = "Is this the correct media you'd like me to use for your content?"
+            
+            if last_message and confirmation_message in last_message.get("content", ""):
+                # Already asked, don't ask again
+                logger.info("Already asked for media confirmation, skipping duplicate")
+                return state
+            
+            # For images, use standard confirmation flow
             message = {
                 "role": "assistant",
                 "content": f"Perfect! I've received your {media_type.split('/')[0]} file.\n\nIs this the correct media you'd like me to use for your content? Please confirm by typing 'yes' to proceed or 'no' to upload a different file.",
@@ -846,6 +845,46 @@ class CustomContentAgent:
         except Exception as e:
             logger.error(f"Error in confirm_media: {e}")
             state["error_message"] = f"Failed to confirm media: {str(e)}"
+            state["current_step"] = ConversationStep.ERROR
+            
+        return state
+    
+    async def ask_thumbnail(self, state: CustomContentState) -> CustomContentState:
+        """Ask user to select thumbnail style for video"""
+        try:
+            state["current_step"] = ConversationStep.ASK_THUMBNAIL
+            state["progress_percentage"] = 62
+            
+            video_url = state.get("uploaded_media_url")
+            content_type = state.get("selected_content_type", "")
+            
+            message = {
+                "role": "assistant",
+                "content": f"Great! Now choose your thumbnail style:",
+                "timestamp": datetime.now().isoformat(),
+                "video_url": video_url,
+                "options": [
+                    {
+                        "value": "upload_thumbnail",
+                        "label": "📷 Upload a thumbnail"
+                    },
+                    {
+                        "value": "generate_thumbnail",
+                        "label": "🎨 Let Leo generate a thumbnail"
+                    },
+                    {
+                        "value": "auto_extract",
+                        "label": "🎬 Auto-extract a frame from your video"
+                    }
+                ]
+            }
+            state["conversation_messages"].append(message)
+            
+            logger.info(f"Asked user to select thumbnail style for {content_type}")
+            
+        except Exception as e:
+            logger.error(f"Error in ask_thumbnail: {e}")
+            state["error_message"] = f"Failed to ask about thumbnail: {str(e)}"
             state["current_step"] = ConversationStep.ERROR
             
         return state
@@ -934,15 +973,25 @@ class CustomContentAgent:
             carousel_images = state.get("carousel_images", [])
             
             if not user_input:
-                # Show all images and ask for approval
-                if carousel_images and len(carousel_images) == 4:
+                # Show all images with original and edited versions, plus editing options
+                if carousel_images and len(carousel_images) >= 1:
+                    image_count = len(carousel_images)
                     message = {
                         "role": "assistant",
-                        "content": "Perfect! I've generated all 4 carousel images for you. Please review them below. Do you want to approve these images and continue?",
+                        "content": f"Perfect! I've generated {image_count} carousel image(s) for you. Review them below - you'll see both the original and an improved version for each image.\n\nYou can edit any image with these options:",
                         "timestamp": datetime.now().isoformat(),
                         "carousel_images": [img.get("url") for img in carousel_images if img.get("url")],
+                        "show_editing_options": True,
+                        "editing_options": [
+                            {"value": "background_change", "label": "🎨 Background change"},
+                            {"value": "color_correction", "label": "🌈 Color correction"},
+                            {"value": "filters", "label": "✨ Filters"},
+                            {"value": "sharpness", "label": "🔍 Sharpness"},
+                            {"value": "crop", "label": "✂️ Crop"},
+                            {"value": "cleanup", "label": "🧹 Clean-up"}
+                        ],
                         "options": [
-                            {"value": "approve", "label": "✅ Yes, approve and continue"},
+                            {"value": "approve", "label": "✅ Approve and continue"},
                             {"value": "regenerate", "label": "🔄 Regenerate all images"},
                             {"value": "manual_upload", "label": "📤 Switch to manual upload"}
                         ]
@@ -1359,8 +1408,15 @@ Return ONLY valid JSON, no markdown code blocks."""
             media_type = state.get("media_type", "")
             generated_script = state.get("generated_script")  # Get generated script if available
             
-            # Check if this is a carousel post
+            # Check if this is an Image Post - handle specially
+            is_image_post = content_type.lower() in ["image post", "image", "photo"]
             is_carousel = content_type.lower() == "carousel"
+            
+            # SPECIAL HANDLING FOR IMAGE POST: Generate short caption only
+            # Use edited image URL if available, otherwise uploaded or generated
+            image_url_for_post = state.get("edited_image_url") or uploaded_media_url or generated_media_url
+            if is_image_post and has_media and image_url_for_post and not is_carousel:
+                return await self._generate_image_post_content(state, image_url_for_post, user_description, platform, content_type)
             carousel_images = []
             
             if is_carousel:
@@ -1516,6 +1572,12 @@ Return ONLY valid JSON, no markdown code blocks."""
                     "media_url": uploaded_media_url if (has_media and not is_carousel) else None
                 }
             
+            # Ensure uploaded image is always included for Image Post
+            if content_type.lower() in ["image post", "photo"] and has_media and uploaded_media_url and not is_carousel:
+                content_data["media_url"] = uploaded_media_url
+                content_data["post_type"] = "image"
+                logger.info(f"Including uploaded image in Image Post: {uploaded_media_url}")
+            
             # Add carousel images to content data if this is a carousel post
             if is_carousel and carousel_images:
                 content_data["carousel_images"] = carousel_images
@@ -1584,6 +1646,26 @@ Return ONLY valid JSON, no markdown code blocks."""
                             state["media_type"] = MediaType.IMAGE
                             state["has_media"] = True
                             
+                            # Update generated_content with the media URL (important for Image Posts)
+                            if state.get("generated_content"):
+                                state["generated_content"]["media_url"] = media_result["image_url"]
+                                # Ensure type is set correctly for Image Posts
+                                content_type = state.get("selected_content_type", "").lower()
+                                if content_type in ["image post", "image", "photo"]:
+                                    state["generated_content"]["type"] = "image_post"
+                                    state["generated_content"]["post_type"] = "image"
+                            
+                            # Update content history if it exists (to include the generated media URL)
+                            if state.get("content_history") and len(state["content_history"]) > 0:
+                                # Update the most recent version in history
+                                latest_version = state["content_history"][-1]
+                                if latest_version.get("content"):
+                                    latest_version["content"]["media_url"] = media_result["image_url"]
+                                    content_type = state.get("selected_content_type", "").lower()
+                                    if content_type in ["image post", "image", "photo"]:
+                                        latest_version["content"]["type"] = "image_post"
+                                        latest_version["content"]["post_type"] = "image"
+                            
                             # Update the content message to include the generated image
                             state["conversation_messages"][-1]["media_url"] = media_result["image_url"]
                             state["conversation_messages"][-1]["media_type"] = "image"
@@ -1612,16 +1694,46 @@ Return ONLY valid JSON, no markdown code blocks."""
                     state["should_generate_media"] = False
                     state["has_media"] = False
             
-            # Transition directly to confirm content step
-            state["current_step"] = ConversationStep.CONFIRM_CONTENT
+            # Initialize content history if this is the first generation
+            if "content_history" not in state or not state.get("content_history"):
+                state["content_history"] = []
+                state["current_content_version"] = 0
+            
+            # Add current content to history
+            # Use generated_content from state (which may have been updated with media URL after generation)
+            content_to_add = state.get("generated_content", content_data).copy()
+            content_version = {
+                "content": content_to_add,
+                "version": len(state["content_history"]) + 1,
+                "timestamp": datetime.now().isoformat(),
+                "is_current": True
+            }
+            
+            # Mark all previous versions as not current
+            for prev_version in state["content_history"]:
+                prev_version["is_current"] = False
+            
+            state["content_history"].append(content_version)
+            state["current_content_version"] = len(state["content_history"]) - 1
+            
+            # Transition to preview and edit step
+            state["current_step"] = ConversationStep.PREVIEW_AND_EDIT
             state["progress_percentage"] = 85
             
             # Clear any previous error messages
             if "error_message" in state:
                 del state["error_message"]
             
-            # Automatically call confirm_content to show the confirmation message
-            return await self.confirm_content(state)
+            # Remove the content message added earlier - preview_and_edit will add its own preview message
+            # Keep only the last message if it's not a preview message
+            if state["conversation_messages"]:
+                last_msg = state["conversation_messages"][-1]
+                if not last_msg.get("preview_mode"):
+                    # Remove the last message - preview_and_edit will add a proper preview message
+                    state["conversation_messages"] = state["conversation_messages"][:-1]
+            
+            # Go to preview and edit - this will add the preview message
+            return await self.preview_and_edit(state)
             
         except Exception as e:
             logger.error(f"Critical error in generate_content: {e}")
@@ -1649,15 +1761,32 @@ Return ONLY valid JSON, no markdown code blocks."""
                 }
                 state["conversation_messages"].append(message)
                 
-                # Continue to confirmation step
-                state["current_step"] = ConversationStep.CONFIRM_CONTENT
+                # Initialize content history if needed
+                if "content_history" not in state or not state.get("content_history"):
+                    state["content_history"] = []
+                    state["current_content_version"] = 0
+                
+                # Add basic content to history
+                content_version = {
+                    "content": basic_content.copy(),
+                    "version": len(state.get("content_history", [])) + 1,
+                    "timestamp": datetime.now().isoformat(),
+                    "is_current": True
+                }
+                if "content_history" not in state:
+                    state["content_history"] = []
+                state["content_history"].append(content_version)
+                state["current_content_version"] = len(state["content_history"]) - 1
+                
+                # Continue to preview and edit step
+                state["current_step"] = ConversationStep.PREVIEW_AND_EDIT
                 state["progress_percentage"] = 85
-                return await self.confirm_content(state)
+                return await self.preview_and_edit(state)
             except Exception as e2:
                 logger.error(f"Failed to create basic content: {e2}")
                 # Last resort - set error but don't break the flow
                 state["error_message"] = f"Content generation failed: {str(e)}"
-                state["current_step"] = ConversationStep.CONFIRM_CONTENT
+                state["current_step"] = ConversationStep.PREVIEW_AND_EDIT
                 return state
             
         except Exception as e:
@@ -1666,6 +1795,275 @@ Return ONLY valid JSON, no markdown code blocks."""
             state["current_step"] = ConversationStep.ERROR
             
         return state
+
+    async def preview_and_edit(self, state: CustomContentState) -> CustomContentState:
+        """Preview content and allow real-time editing with natural language prompts"""
+        try:
+            # Check if user wants to edit (has edit prompt)
+            if state.get("wants_to_edit", False) and state.get("edit_prompt"):
+                # Apply the edit
+                edit_prompt = state.get("edit_prompt", "")
+                state["wants_to_edit"] = False
+                state.pop("edit_prompt", None)
+                return await self.apply_content_edit(state, edit_prompt)
+            
+            # Check if user just switched versions - refresh preview with new version
+            if state.get("version_switched", False):
+                state["version_switched"] = False
+                state["preview_confirmed"] = False  # Reset preview confirmation after version switch
+                logger.info("Version switched, refreshing preview")
+            
+            # Check if preview is already confirmed AND we already have a preview message - skip showing preview again
+            # But if we're coming from generate_content, we need to show the preview even if preview_confirmed is False
+            if state.get("preview_confirmed", False):
+                # Check if there's already a preview message in the conversation
+                has_preview_message = any(msg.get("preview_mode") for msg in state.get("conversation_messages", []))
+                if has_preview_message:
+                    logger.info("Preview already confirmed and message exists, skipping preview display")
+                    return state
+                # If no preview message exists, show it anyway
+                logger.info("Preview confirmed but no message exists, showing preview")
+            
+            state["current_step"] = ConversationStep.PREVIEW_AND_EDIT
+            state["progress_percentage"] = 90
+            
+            # Get current content version
+            content_history = state.get("content_history", [])
+            current_version_index = state.get("current_content_version", len(content_history) - 1 if content_history else -1)
+            
+            if not content_history or current_version_index < 0 or current_version_index >= len(content_history):
+                # Fallback to generated_content if history is empty
+                current_content = state.get("generated_content", {})
+                if not current_content:
+                    state["error_message"] = "No content available to preview"
+                    state["current_step"] = ConversationStep.ERROR
+                    return state
+            else:
+                current_content = content_history[current_version_index]["content"]
+            
+            platform = state.get("selected_platform", "")
+            content_type = state.get("selected_content_type", "")
+            
+            # Get image URL for Image Post
+            is_image_post = current_content.get("type") == "image_post" or content_type.lower() in ["image post", "image", "photo"]
+            image_url = current_content.get("media_url") or state.get("edited_image_url") or state.get("uploaded_media_url") or state.get("generated_media_url")
+            
+            # Create preview message with all versions
+            message = {
+                "role": "assistant",
+                "content": f"**Preview your {content_type} for {platform}**\n\nPreview your post and fine-tune it in real time. You can make instant changes by describing your edit in natural language.",
+                "timestamp": datetime.now().isoformat(),
+                "preview_mode": True,
+                "current_content": current_content,
+                "content_history": content_history,
+                "current_version": current_version_index + 1 if current_version_index >= 0 else 1,
+                "total_versions": len(content_history) if content_history else 1,
+                "can_undo": current_version_index > 0,
+                "options": [
+                    {"value": "proceed", "label": "✅ Looks good, proceed to schedule"},
+                    {"value": "edit", "label": "✏️ Edit this content"}
+                ]
+            }
+            
+            # Add image preview for Image Post
+            if is_image_post and image_url:
+                message["has_media"] = True
+                message["media_url"] = image_url
+                message["media_type"] = "image"
+                message["image_post"] = True
+            
+            # Remove any existing preview messages to avoid duplicates
+            state["conversation_messages"] = [
+                msg for msg in state.get("conversation_messages", [])
+                if not msg.get("preview_mode")
+            ]
+            
+            state["conversation_messages"].append(message)
+            
+            logger.info(f"Showing preview for {content_type} on {platform} (version {current_version_index + 1 if current_version_index >= 0 else 1})")
+            logger.info(f"Preview message added to conversation. Total messages: {len(state.get('conversation_messages', []))}")
+            logger.info(f"Current step after preview: {state.get('current_step')}")
+            
+        except Exception as e:
+            logger.error(f"Error in preview_and_edit: {e}")
+            state["error_message"] = f"Failed to show preview: {str(e)}"
+            state["current_step"] = ConversationStep.ERROR
+            
+        return state
+    
+    async def apply_content_edit(self, state: CustomContentState, edit_prompt: str) -> CustomContentState:
+        """Apply edits to content based on natural language prompt"""
+        try:
+            # Get current content
+            content_history = state.get("content_history", [])
+            current_version_index = state.get("current_content_version", len(content_history) - 1 if content_history else -1)
+            
+            if not content_history or current_version_index < 0:
+                current_content = state.get("generated_content", {})
+            else:
+                current_content = content_history[current_version_index]["content"]
+            
+            if not current_content:
+                state["error_message"] = "No content available to edit"
+                return state
+            
+            platform = state.get("selected_platform", "")
+            content_type = state.get("selected_content_type", "")
+            user_description = state.get("user_description", "")
+            business_context = state.get("business_context") or self._load_business_context(state["user_id"])
+            
+            # Check if user has uploaded media that should be preserved
+            uploaded_media_url = state.get("uploaded_media_url")
+            has_media = state.get("has_media", False)
+            is_image_post = content_type.lower() in ["image post", "photo"]
+            
+            # Determine if edit is about image refinement or content refinement
+            edit_lower = edit_prompt.lower()
+            is_image_refinement = any(keyword in edit_lower for keyword in [
+                "image", "picture", "photo", "visual", "background", "color", "brightness", 
+                "filter", "crop", "sharpness", "edit image", "change image", "modify image"
+            ])
+            
+            # Create sanitized content for editing (exclude media_url to avoid token limit)
+            # Only include editable text fields
+            sanitized_content = {}
+            for key in ["caption", "hashtags", "call_to_action", "cta", "alt_text", "content", "title", "description"]:
+                if key in current_content:
+                    sanitized_content[key] = current_content[key]
+            
+            # Store the media_url separately to preserve it
+            preserved_media_url = current_content.get("media_url") or state.get("edited_image_url") or uploaded_media_url
+            
+            # Create edit prompt (without media_url to avoid token limit errors)
+            image_preservation_note = ""
+            if is_image_post and has_media:
+                image_preservation_note = """
+                    
+                    IMPORTANT: This is an Image Post. The media_url field will be preserved automatically.
+                    You only need to edit the text fields (caption, hashtags, call_to_action, alt_text).
+                    Do NOT include media_url in your response - it will be added automatically.
+                    """
+            
+            edit_prompt_text = f"""
+            The user wants to edit their {content_type} for {platform}. 
+            
+            Current content (text fields only):
+            {json.dumps(sanitized_content, indent=2)}
+            
+            User's edit request: "{edit_prompt}"
+            {image_preservation_note}
+            Business Context:
+            - Business Name: {business_context.get('business_name', 'Not specified')}
+            - Brand Voice: {business_context.get('brand_voice', 'Professional and friendly')}
+            
+            Apply the requested changes to the text fields only (caption, hashtags, call_to_action, alt_text).
+            Return ONLY a valid JSON object with these fields.
+            Do NOT include media_url or other non-text fields.
+            Do NOT include markdown code blocks.
+            """
+            
+            # Generate edited content
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are an expert content editor. Apply user-requested edits to social media content while maintaining structure and quality."},
+                    {"role": "user", "content": edit_prompt_text}
+                ],
+                temperature=0.7,
+                max_tokens=1000,
+                timeout=60
+            )
+            
+            edited_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON response
+            try:
+                # Try to extract JSON from markdown if present
+                if "```json" in edited_text:
+                    json_start = edited_text.find("```json") + 7
+                    json_end = edited_text.find("```", json_start)
+                    if json_end != -1:
+                        edited_text = edited_text[json_start:json_end].strip()
+                elif "```" in edited_text:
+                    json_start = edited_text.find("```") + 3
+                    json_end = edited_text.find("```", json_start)
+                    if json_end != -1:
+                        edited_text = edited_text[json_start:json_end].strip()
+                
+                # Find JSON object
+                if edited_text.startswith('{') and edited_text.endswith('}'):
+                    json_text = edited_text
+                else:
+                    start_idx = edited_text.find('{')
+                    end_idx = edited_text.rfind('}')
+                    if start_idx != -1 and end_idx != -1:
+                        json_text = edited_text[start_idx:end_idx + 1]
+                    else:
+                        raise ValueError("No JSON found in response")
+                
+                edited_content = json.loads(json_text)
+                
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Failed to parse edited content: {e}")
+                state["error_message"] = f"Failed to apply edit: Could not parse response"
+                # Clear edit flags and return to preview mode
+                state["wants_to_edit"] = False
+                state.pop("edit_prompt", None)
+                # Ensure we're still in preview mode to show options again
+                state["current_step"] = ConversationStep.PREVIEW_AND_EDIT
+                # Show preview again with error message
+                return await self.preview_and_edit(state)
+            
+            # Preserve media_url and other non-text fields from original content
+            if preserved_media_url:
+                edited_content["media_url"] = preserved_media_url
+            
+            # Preserve type and post_type for Image Posts
+            if is_image_post:
+                edited_content["post_type"] = current_content.get("post_type", "image")
+                edited_content["type"] = current_content.get("type", "image_post")
+            
+            # Preserve any other fields that weren't edited (like structured_content, etc.)
+            for key in current_content:
+                if key not in ["caption", "hashtags", "call_to_action", "cta", "alt_text", "content", "title", "description"]:
+                    if key not in edited_content:
+                        edited_content[key] = current_content[key]
+            
+            logger.info(f"Applied edit: {edit_prompt}. Preserved media_url: {preserved_media_url is not None}")
+            
+            # Add edited version to history
+            if "content_history" not in state:
+                state["content_history"] = []
+            
+            # Mark all previous versions as not current
+            for prev_version in state["content_history"]:
+                prev_version["is_current"] = False
+            
+            # Add new version
+            new_version = {
+                "content": edited_content,
+                "version": len(state["content_history"]) + 1,
+                "timestamp": datetime.now().isoformat(),
+                "is_current": True,
+                "edit_prompt": edit_prompt
+            }
+            state["content_history"].append(new_version)
+            state["current_content_version"] = len(state["content_history"]) - 1
+            state["generated_content"] = edited_content
+            
+            # Update preview message
+            return await self.preview_and_edit(state)
+            
+        except Exception as e:
+            logger.error(f"Error applying content edit: {e}")
+            state["error_message"] = f"Failed to apply edit: {str(e)}"
+            # Clear edit flags and return to preview mode
+            state["wants_to_edit"] = False
+            state.pop("edit_prompt", None)
+            # Ensure we're still in preview mode to show options again
+            state["current_step"] = ConversationStep.PREVIEW_AND_EDIT
+            # Show preview again with error message
+            return await self.preview_and_edit(state)
 
     # parse_content function removed - content is now displayed directly in chatbot
     
@@ -1875,22 +2273,8 @@ Return ONLY valid JSON, no markdown code blocks."""
             state["current_step"] = ConversationStep.SELECT_SCHEDULE
             state["progress_percentage"] = 98
             
-            # Only add the message if we haven't already asked for schedule selection
-            # Check if the last message is already asking for schedule selection
-            last_message = state["conversation_messages"][-1] if state["conversation_messages"] else None
-            schedule_message_content = "Great! Now let's schedule your post. Please select the date and time when you'd like this content to be published. You can choose to post immediately or schedule it for later."
-            
-            if not last_message or schedule_message_content not in last_message.get("content", ""):
-                # Create a message asking for schedule selection
-                message = {
-                    "role": "assistant",
-                    "content": schedule_message_content,
-                    "timestamp": datetime.now().isoformat()
-                }
-                state["conversation_messages"].append(message)
-                logger.info("Asking user to select post schedule")
-            else:
-                logger.info("Schedule selection message already present, skipping duplicate")
+            # Don't add any message - let the UI handle the schedule selection directly
+            logger.info("Schedule selection step - UI will handle display")
             
             logger.info(f"Current state step: {state.get('current_step')}")
             logger.info(f"User input in state: {state.get('user_input')}")
@@ -1911,7 +2295,27 @@ Return ONLY valid JSON, no markdown code blocks."""
             user_id = state["user_id"]
             platform = state["selected_platform"]
             content_type = state["selected_content_type"]
-            generated_content = state["generated_content"]
+            
+            # Get generated content from state - use the CURRENT selected version
+            # Only the version marked as is_current will be saved to Supabase
+            # Other versions remain in cache (content_history) but are not persisted
+            content_history = state.get("content_history", [])
+            current_version_index = state.get("current_content_version", len(content_history) - 1 if content_history else -1)
+            
+            # If we have content history, use the current version from history
+            if content_history and current_version_index >= 0 and current_version_index < len(content_history):
+                current_version = content_history[current_version_index]
+                generated_content = current_version.get("content", {}).copy()
+                logger.info(f"💾 Saving version {current_version.get('version', current_version_index + 1)} to Supabase (other {len(content_history) - 1} versions remain in cache)")
+            else:
+                # Fallback to generated_content if no history
+                generated_content = state.get("generated_content", {}).copy()
+                logger.info("💾 Saving content from generated_content (no version history)")
+            
+            if not generated_content:
+                state["error_message"] = "No content available to save"
+                state["current_step"] = ConversationStep.ERROR
+                return state
             
             # Check if this is a carousel post
             is_carousel = content_type and content_type.lower() == "carousel"
@@ -2042,17 +2446,11 @@ Return ONLY valid JSON, no markdown code blocks."""
                             logger.error(f"Failed to save carousel image {idx + 1} to content_images: {e}")
                             # Continue even if one image save fails
                     
-                    # Determine status text for message
-                    status_text = "scheduled" if status == "scheduled" else "draft"
-                    message = {
-                        "role": "assistant",
-                        "content": f"🎉 Perfect! Your carousel post with {len(all_carousel_images)} image(s) for {platform} has been saved as a {status_text} post! 📝\n\n✅ Content generated and optimized\n✅ {len(all_carousel_images)} image(s) saved\n✅ Post saved to your dashboard\n\nYou can now review, edit, or schedule this post from your content dashboard.",
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    state["conversation_messages"].append(message)
+                    # Don't add a message here - ask_another_content will handle it
+                    # Just transition to ask_another_content step
                     state["current_step"] = ConversationStep.ASK_ANOTHER_CONTENT
                     state["progress_percentage"] = 100
-                    state["is_complete"] = True  # Mark as complete so frontend can trigger onContentCreated
+                    # Don't set is_complete yet - wait for user response in ask_another_content
                 else:
                     raise Exception("Failed to save carousel post to database")
                 
@@ -2079,13 +2477,17 @@ Return ONLY valid JSON, no markdown code blocks."""
             # Regular (non-carousel) post handling
             uploaded_media_url = state.get("uploaded_media_url")
             
-            # Determine final media URL (uploaded or generated)
+            # Determine final media URL (edited, uploaded, or generated)
             final_media_url = None
             uploaded_media_url = state.get("uploaded_media_url", "")
             generated_media_url = state.get("generated_media_url", "")
+            edited_media_url = state.get("edited_image_url", "")  # Edited image takes priority
             
-            # Use generated media URL if available, otherwise uploaded media URL
-            if generated_media_url:
+            # Priority: edited > generated > uploaded
+            if edited_media_url:
+                final_media_url = edited_media_url
+                logger.info(f"Using edited image URL: {final_media_url}")
+            elif generated_media_url:
                 final_media_url = generated_media_url
                 logger.info(f"Using generated media URL: {final_media_url}")
             elif uploaded_media_url and uploaded_media_url.startswith("data:"):
@@ -2134,13 +2536,23 @@ Return ONLY valid JSON, no markdown code blocks."""
             else:
                 post_type = content_type
             
+            # Handle Image Post structure (caption, hashtags, CTA)
+            is_image_post = generated_content.get("type") == "image_post" or content_type.lower() in ["image post", "image", "photo"]
+            
+            if is_image_post:
+                # Image Post: use caption instead of content
+                post_content = generated_content.get("caption", generated_content.get("content", ""))
+            else:
+                # Regular post: use content
+                post_content = generated_content.get("content", "")
+            
             # Create post data for content_posts table
             post_data = {
                 "campaign_id": campaign_id,  # Use the custom content campaign
                 "platform": platform,
-                "post_type": post_type,
+                "post_type": "image" if is_image_post else post_type,
                 "title": generated_content.get("title", ""),
-                "content": generated_content.get("content", ""),
+                "content": post_content,
                 "hashtags": generated_content.get("hashtags", []),
                 "scheduled_date": scheduled_datetime.date().isoformat(),
                 "scheduled_time": scheduled_datetime.time().isoformat(),
@@ -2173,6 +2585,15 @@ Return ONLY valid JSON, no markdown code blocks."""
                 post_data["primary_image_url"] = final_media_url
                 post_data["primary_image_prompt"] = image_prompt
                 post_data["primary_image_approved"] = True  # User uploads/generated images in custom content are auto-approved
+                
+                # For Image Post, also store alt text
+                if is_image_post and generated_content.get("alt_text"):
+                    post_data["metadata"]["alt_text"] = generated_content.get("alt_text")
+                elif state.get("image_edit_type"):
+                    # Image was edited
+                    edit_type = state.get("image_edit_type", "")
+                    image_prompt = f"User uploaded image edited with {edit_type.replace('_', ' ')}"
+                    post_data["primary_image_prompt"] = image_prompt
             
             # Validate status matches scheduled time
             now = datetime.now()
@@ -2221,18 +2642,11 @@ Return ONLY valid JSON, no markdown code blocks."""
                 # Determine if image was uploaded or generated
                 image_source = "generated" if generated_media_url else "uploaded"
                 
-                # Determine status text for message
-                status_text = "scheduled" if status == "scheduled" else "draft"
-                
-                message = {
-                    "role": "assistant",
-                    "content": f"🎉 Perfect! Your {content_type} for {platform} has been saved as a {status_text} post! 📝\n\n✅ Content generated and optimized\n✅ Image {image_source} and saved to storage\n✅ Post saved to your dashboard\n\nYou can now review, edit, or schedule this post from your content dashboard. The post includes your {image_source} image and is ready to go!",
-                    "timestamp": datetime.now().isoformat()
-                }
-                state["conversation_messages"].append(message)
+                # Don't add a message here - ask_another_content will handle it
+                # Just transition to ask_another_content step
                 state["current_step"] = ConversationStep.ASK_ANOTHER_CONTENT
                 state["progress_percentage"] = 100
-                state["is_complete"] = True  # Mark as complete so frontend can trigger onContentCreated
+                # Don't set is_complete yet - wait for user response in ask_another_content
             else:
                 raise Exception("Failed to save content to database")
             
@@ -2263,21 +2677,26 @@ Return ONLY valid JSON, no markdown code blocks."""
         return state
     
     async def ask_another_content(self, state: CustomContentState) -> CustomContentState:
-        """Ask if user wants to generate another content"""
+        """Ask if user wants to generate another content after scheduling"""
         try:
+            state["current_step"] = ConversationStep.ASK_ANOTHER_CONTENT
             logger.info("Asking if user wants to generate another content")
             
             # Only add the message if we haven't already asked about another content
             # Check if the last message is already asking about another content
             last_message = state["conversation_messages"][-1] if state["conversation_messages"] else None
-            another_content_message = "Would you like to create another piece of content? Just let me know!"
+            another_content_message = "Your post has been saved to the schedule section! 🎉\n\nWant to create another post or are you done for now?"
             
             if not last_message or another_content_message not in last_message.get("content", ""):
-                # Add the question message
+                # Add the question message with options
                 message = {
                     "role": "assistant",
                     "content": another_content_message,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "options": [
+                        {"value": "yes", "label": "Create another post"},
+                        {"value": "no", "label": "I'm done for now"}
+                    ]
                 }
                 state["conversation_messages"].append(message)
                 logger.info("Added ask another content message")
@@ -2289,6 +2708,701 @@ Return ONLY valid JSON, no markdown code blocks."""
         except Exception as e:
             logger.error(f"Error in ask_another_content: {e}")
             state["error_message"] = f"Failed to ask about another content: {str(e)}"
+            state["current_step"] = ConversationStep.ERROR
+            return state
+    
+    async def _generate_image_post_content(self, state: CustomContentState, image_url: str, user_description: str, platform: str, content_type: str) -> CustomContentState:
+        """Generate short caption, hashtags, and CTA for Image Post only"""
+        try:
+            # Load business context
+            business_context = state.get("business_context")
+            if not business_context:
+                user_id = state.get("user_id")
+                if user_id:
+                    business_context = self._load_business_context(user_id)
+                    state["business_context"] = business_context
+                else:
+                    business_context = {}
+            
+            # Analyze image
+            image_analysis = ""
+            try:
+                image_analysis = await self._analyze_uploaded_image(image_url, user_description, business_context)
+                logger.info("Image analysis completed for Image Post")
+            except Exception as e:
+                logger.error(f"Image analysis failed: {e}")
+                image_analysis = f"Image analysis failed: {str(e)}"
+            
+            # Create prompt for SHORT caption only (not long content)
+            prompt = f"""
+            Create a SHORT, engaging Instagram-style caption for an Image Post on {platform}.
+            
+            User's description: "{user_description}"
+            
+            Image Analysis:
+            {image_analysis if image_analysis else "No image analysis available"}
+            
+            Business Context:
+            - Business Name: {business_context.get('business_name', 'Not specified')}
+            - Brand Voice: {business_context.get('brand_voice', 'Professional and friendly')}
+            
+            Requirements:
+            - Generate ONLY a short, punchy caption (1-2 sentences max, ~125 characters ideal for Instagram)
+            - Include relevant hashtags (platform-appropriate count)
+            - Add a compelling call-to-action (CTA)
+            - Include alt text for accessibility
+            
+            CRITICAL: Return ONLY a valid JSON object. Do NOT use markdown code blocks.
+            
+            {{
+              "caption": "Short, engaging caption here",
+              "hashtags": ["hashtag1", "hashtag2", "hashtag3"],
+              "call_to_action": "Compelling CTA",
+              "alt_text": "Accessibility description of the image"
+            }}
+            """
+            
+            # Generate content with image
+            # Try to download image and use base64 if URL fails
+            import base64
+            import httpx
+            
+            image_for_api = image_url
+            try:
+                # Try downloading the image to use base64 (more reliable than URL)
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    img_response = await client.get(image_url)
+                    img_response.raise_for_status()
+                    img_data = img_response.content
+                    img_base64 = base64.b64encode(img_data).decode('utf-8')
+                    # Determine format from HTTP content-type header
+                    http_content_type = img_response.headers.get('content-type', 'image/jpeg')
+                    if 'png' in http_content_type:
+                        img_format = 'png'
+                    elif 'jpeg' in http_content_type or 'jpg' in http_content_type:
+                        img_format = 'jpeg'
+                    else:
+                        img_format = 'jpeg'
+                    image_for_api = f"data:image/{img_format};base64,{img_base64}"
+                    logger.info(f"Downloaded image for OpenAI API: {len(img_data)} bytes")
+            except Exception as download_err:
+                logger.warning(f"Could not download image for API, using URL: {download_err}")
+                # Will try URL, but might timeout
+                image_for_api = image_url
+            
+            messages = [
+                {"role": "system", "content": "You are an expert social media content creator. Generate SHORT, engaging captions for image posts. Return ONLY valid JSON, no markdown."},
+                {"role": "user", "content": prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Here's the image for this post:"},
+                        {"type": "image_url", "image_url": {"url": image_for_api}}
+                    ]
+                }
+            ]
+            
+            try:
+                response = self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=500,  # Shorter for caption only
+                    timeout=60
+                )
+                generated_text = response.choices[0].message.content.strip()
+            except Exception as api_error:
+                logger.warning(f"OpenAI API error for content generation: {api_error}")
+                # Continue without API - use fallback content based on user description
+                logger.info("Using fallback content generation without image analysis")
+                generated_text = None
+            
+            # Parse JSON or use fallback
+            if generated_text:
+                try:
+                    if "```json" in generated_text:
+                        json_start = generated_text.find("```json") + 7
+                        json_end = generated_text.find("```", json_start)
+                        if json_end != -1:
+                            generated_text = generated_text[json_start:json_end].strip()
+                    elif "```" in generated_text:
+                        json_start = generated_text.find("```") + 3
+                        json_end = generated_text.find("```", json_start)
+                        if json_end != -1:
+                            generated_text = generated_text[json_start:json_end].strip()
+                    
+                    if generated_text.startswith('{') and generated_text.endswith('}'):
+                        json_text = generated_text
+                    else:
+                        start_idx = generated_text.find('{')
+                        end_idx = generated_text.rfind('}')
+                        if start_idx != -1 and end_idx != -1:
+                            json_text = generated_text[start_idx:end_idx + 1]
+                        else:
+                            raise ValueError("No JSON found")
+                    
+                    content_data = json.loads(json_text)
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning(f"Failed to parse Image Post content: {e}, using fallback")
+                    # Fallback
+                    content_data = {
+                        "caption": user_description[:125] if len(user_description) > 125 else user_description,
+                        "hashtags": self._extract_hashtags(user_description),
+                        "call_to_action": "Check it out!",
+                        "alt_text": "Social media post image"
+                    }
+            else:
+                # No API response - use fallback
+                logger.info("No API response, using fallback content")
+                content_data = {
+                    "caption": user_description[:125] if len(user_description) > 125 else user_description,
+                    "hashtags": self._extract_hashtags(user_description),
+                    "call_to_action": "Check it out!",
+                    "alt_text": "Social media post image"
+                }
+            
+            # Structure as Image Post
+            content_data["type"] = "image_post"
+            # Use edited image URL if available, otherwise the provided image_url
+            final_image_url = state.get("edited_image_url") or image_url
+            content_data["media_url"] = final_image_url
+            content_data["post_type"] = "image"
+            
+            state["generated_content"] = content_data
+            
+            # Use edited image URL if available
+            final_image_url = state.get("edited_image_url") or image_url
+            
+            # Initialize content history if this is the first generation
+            if "content_history" not in state or not state.get("content_history"):
+                state["content_history"] = []
+                state["current_content_version"] = 0
+            
+            # Add current content to history
+            content_version = {
+                "content": content_data.copy(),
+                "version": len(state["content_history"]) + 1,
+                "timestamp": datetime.now().isoformat(),
+                "is_current": True
+            }
+            
+            # Mark all previous versions as not current
+            for prev_version in state["content_history"]:
+                prev_version["is_current"] = False
+            
+            state["content_history"].append(content_version)
+            state["current_content_version"] = len(state["content_history"]) - 1
+            
+            # DO NOT add preview message here - let preview_and_edit add it with proper structure
+            # This ensures the preview message has all required fields (options, etc.)
+            
+            logger.info(f"Generated Image Post content for {platform}")
+            
+            # Transition to preview_and_edit
+            state["current_step"] = ConversationStep.PREVIEW_AND_EDIT
+            state["progress_percentage"] = 85
+            
+            return state
+            
+        except Exception as e:
+            logger.error(f"Error generating Image Post content: {e}")
+            # Don't set ERROR state - use fallback content instead
+            logger.info("Using fallback content due to error")
+            try:
+                # Get user description from state if not in scope
+                user_desc = state.get("user_description", user_description if 'user_description' in locals() else "Image post")
+                
+                # Create fallback content
+                content_data = {
+                    "caption": user_desc[:125] if len(user_desc) > 125 else user_desc,
+                    "hashtags": self._extract_hashtags(user_desc),
+                    "call_to_action": "Check it out!",
+                    "alt_text": "Social media post image",
+                    "type": "image_post",
+                    "media_url": state.get("edited_image_url") or image_url,
+                    "post_type": "image"
+                }
+                state["generated_content"] = content_data
+                
+                # Create message
+                hashtags_text = ' '.join([f"#{tag.replace('#', '')}" for tag in content_data.get('hashtags', [])])
+                message_content = f"Perfect! I've created your Image Post caption:\n\n**Caption:**\n{content_data.get('caption', '')}\n\n**Hashtags:**\n{hashtags_text}\n\n**Call to Action:**\n{content_data.get('call_to_action', '')}"
+                
+                final_image_url = state.get("edited_image_url") or image_url
+                message = {
+                    "role": "assistant",
+                    "content": message_content,
+                    "timestamp": datetime.now().isoformat(),
+                    "has_media": True,
+                    "media_url": final_image_url,
+                    "media_type": "image",
+                    "structured_content": None,
+                    "image_post": True
+                }
+                state["conversation_messages"].append(message)
+                
+                # Transition to preview_and_edit
+                state["current_step"] = ConversationStep.PREVIEW_AND_EDIT
+                logger.info("Generated fallback Image Post content")
+            except Exception as fallback_error:
+                logger.error(f"Even fallback failed: {fallback_error}")
+                state["error_message"] = f"Failed to generate Image Post content: {str(e)}"
+                state["current_step"] = ConversationStep.ERROR
+            return state
+    
+    async def generate_edited_image_with_prompt(self, state: CustomContentState, edit_prompt: str) -> CustomContentState:
+        """Generate edited image using AI based on natural language prompt"""
+        try:
+            import google.generativeai as genai
+            import base64
+            import httpx
+            import uuid
+            
+            image_url = state.get("uploaded_media_url") or state.get("generated_media_url")
+            if not image_url:
+                state["error_message"] = "No image available to edit"
+                return state
+            
+            user_id = state.get("user_id")
+            platform = state.get("selected_platform", "social_media")
+            
+            # Handle base64 data URLs (data:image/...) - these are too long to download
+            if image_url.startswith("data:image/"):
+                # Extract base64 data from data URL
+                try:
+                    # Format: data:image/jpeg;base64,<base64_data>
+                    header, base64_data = image_url.split(",", 1)
+                    # Decode base64 to get image bytes, then re-encode for Gemini
+                    image_data = base64.b64decode(base64_data)
+                    base64_image = base64.b64encode(image_data).decode('utf-8')
+                    logger.info(f"Extracted image from base64 data URL: {len(image_data)} bytes")
+                except Exception as e:
+                    logger.error(f"Failed to parse base64 data URL: {e}")
+                    state["error_message"] = f"Failed to process image: {str(e)}"
+                    return state
+            else:
+                # Download original image from URL
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        image_response = await client.get(image_url)
+                        image_response.raise_for_status()
+                        image_data = image_response.content
+                    
+                    # Convert to base64
+                    base64_image = base64.b64encode(image_data).decode('utf-8')
+                    logger.info(f"Downloaded image from URL: {len(image_data)} bytes")
+                except Exception as e:
+                    error_str = str(e)
+                    if "URL too long" in error_str or "too long" in error_str.lower():
+                        logger.error(f"Image URL is too long to download: {len(image_url)} characters")
+                        state["error_message"] = "Image URL is too long. Please try uploading the image again or use a different image."
+                    else:
+                        logger.error(f"Failed to download image: {e}")
+                        state["error_message"] = f"Failed to download image: {str(e)}"
+                    return state
+            
+            # Create comprehensive edit prompt
+            full_prompt = f"""Edit this image according to the following instructions: {edit_prompt}
+
+IMPORTANT REQUIREMENTS:
+- Maintain the overall composition and quality
+- Apply the requested changes precisely
+- Preserve image quality and resolution
+- Return the edited image, not a text description
+- Ensure the edited image matches the original dimensions and aspect ratio
+
+OUTPUT: Return only the edited image."""
+            
+            # Initialize Gemini
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if not gemini_api_key:
+                state["error_message"] = "Image editing not available - GEMINI_API_KEY not set"
+                return state
+            
+            # Configure Gemini API (matching media_agent pattern)
+            genai.configure(api_key=gemini_api_key)
+            gemini_model = 'gemini-2.5-flash-image-preview'
+            
+            # Create contents for Gemini
+            contents = [
+                {"text": full_prompt},
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": base64_image
+                    }
+                }
+            ]
+            
+            # Generate edited image using Gemini
+            logger.info(f"Calling Gemini model: {gemini_model} for image editing")
+            logger.info(f"Edit prompt: {edit_prompt[:100]}...")
+            logger.info(f"Image size: {len(image_data)} bytes")
+            
+            try:
+                response = genai.GenerativeModel(gemini_model).generate_content(
+                    contents=contents,
+                )
+                
+                logger.info(f"Gemini response received: {len(response.candidates) if response.candidates else 0} candidates")
+                
+                # Extract image from response
+                if not response.candidates or not response.candidates[0].content:
+                    raise Exception("No image returned from Gemini - no candidates in response")
+                
+                edited_image_data = None
+                candidate = response.candidates[0]
+                
+                # Check all parts for image data
+                for i, part in enumerate(candidate.content.parts):
+                    logger.info(f"Checking part {i}: inline_data={part.inline_data is not None if hasattr(part, 'inline_data') else False}")
+                    if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
+                        # Gemini may return bytes or base64 string
+                        image_data_raw = part.inline_data.data
+                        if isinstance(image_data_raw, bytes):
+                            edited_image_data = image_data_raw
+                        else:
+                            # If it's base64 string, decode it
+                            edited_image_data = base64.b64decode(image_data_raw)
+                        logger.info(f"Found image data in part {i}: {len(edited_image_data)} bytes")
+                        break
+                    elif hasattr(part, 'text') and part.text:
+                        logger.warning(f"Part {i} contains text instead of image: {part.text[:200]}...")
+                
+                if not edited_image_data:
+                    # Try to get text response for debugging
+                    text_content = ""
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            text_content += part.text
+                    logger.error(f"No image data found. Gemini text response: {text_content[:500]}...")
+                    raise Exception(f"No image data in Gemini response. Response: {text_content[:200]}")
+                    
+            except Exception as gemini_error:
+                error_str = str(gemini_error)
+                logger.error(f"Gemini API error: {error_str}")
+                
+                # Check for specific error types
+                if "API key" in error_str.lower() or "authentication" in error_str.lower():
+                    state["error_message"] = "Gemini API authentication failed. Please check GEMINI_API_KEY."
+                    return state
+                elif "quota" in error_str.lower() or "limit" in error_str.lower():
+                    state["error_message"] = "Gemini API quota exceeded. Please try again later."
+                    return state
+                else:
+                    state["error_message"] = f"Failed to edit image with Gemini: {error_str}"
+                    return state
+            
+            # Upload edited image to Supabase
+            filename = f"custom_content_{user_id}_{platform}_{uuid.uuid4().hex[:8]}_edited.jpg"
+            bucket_name = "user-uploads"
+            
+            storage_response = self.supabase.storage.from_(bucket_name).upload(
+                filename,
+                edited_image_data,
+                file_options={"content-type": "image/jpeg"}
+            )
+            
+            if hasattr(storage_response, 'error') and storage_response.error:
+                raise Exception(f"Storage upload failed: {storage_response.error}")
+            
+            edited_image_url = self.supabase.storage.from_(bucket_name).get_public_url(filename)
+            
+            # Update state with edited image (preserve original URL)
+            original_url = state.get("uploaded_media_url") or state.get("generated_media_url")
+            state["edited_image_url"] = edited_image_url
+            state["image_edit_type"] = "custom_edit"
+            
+            # Store original URL for version comparison
+            if not state.get("original_image_url"):
+                state["original_image_url"] = original_url
+            
+            logger.info(f"Successfully generated and uploaded edited image: {edited_image_url}")
+            
+            # Initialize content history if needed
+            if "content_history" not in state:
+                state["content_history"] = []
+            
+            # Create a version entry for the edited image
+            version_number = len(state["content_history"]) + 1
+            edited_version = {
+                "content": {
+                    "type": "image_post",
+                    "media_url": edited_image_url,
+                    "original_media_url": original_url,
+                    "edit_prompt": edit_prompt,
+                    "is_edited": True
+                },
+                "version": version_number,
+                "timestamp": datetime.now().isoformat(),
+                "is_current": True
+            }
+            # Mark previous versions as not current
+            for prev_version in state["content_history"]:
+                prev_version["is_current"] = False
+            state["content_history"].append(edited_version)
+            state["current_content_version"] = len(state["content_history"]) - 1
+            
+            # Add success message showing edited version
+            message = {
+                "role": "assistant",
+                "content": f"✅ Image edited successfully! Here's version {version_number} of your image:\n\n**Edit applied:** {edit_prompt}\n\nYou can continue editing or proceed to generate the caption.",
+                "timestamp": datetime.now().isoformat(),
+                "has_media": True,
+                "media_url": edited_image_url,
+                "media_type": "image",
+                "original_image_url": original_url,  # Show original for comparison
+                "is_edited_version": True,
+                "edit_prompt": edit_prompt,
+                "version_number": version_number
+            }
+            state["conversation_messages"].append(message)
+            
+            return state
+            
+        except Exception as e:
+            logger.error(f"Error generating edited image with prompt: {e}")
+            state["error_message"] = f"Failed to edit image: {str(e)}"
+            return state
+    
+    async def generate_edited_image(self, state: CustomContentState, edit_type: str, edit_instructions: str = "") -> CustomContentState:
+        """Generate edited image using AI based on edit type and instructions"""
+        try:
+            import google.generativeai as genai
+            import base64
+            import httpx
+            import uuid
+            
+            image_url = state.get("uploaded_media_url") or state.get("generated_media_url")
+            if not image_url:
+                state["error_message"] = "No image available to edit"
+                return state
+            
+            user_id = state.get("user_id")
+            platform = state.get("selected_platform", "social_media")
+            
+            # Handle base64 data URLs (data:image/...) - these are too long to download
+            if image_url.startswith("data:image/"):
+                # Extract base64 data from data URL
+                try:
+                    # Format: data:image/jpeg;base64,<base64_data>
+                    header, base64_data = image_url.split(",", 1)
+                    # Decode base64 to get image bytes, then re-encode for Gemini
+                    image_data = base64.b64decode(base64_data)
+                    base64_image = base64.b64encode(image_data).decode('utf-8')
+                    logger.info(f"Extracted image from base64 data URL: {len(image_data)} bytes")
+                except Exception as e:
+                    logger.error(f"Failed to parse base64 data URL: {e}")
+                    state["error_message"] = f"Failed to process image: {str(e)}"
+                    return state
+            else:
+                # Download original image from URL
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        image_response = await client.get(image_url)
+                        image_response.raise_for_status()
+                        image_data = image_response.content
+                    
+                    # Convert to base64
+                    base64_image = base64.b64encode(image_data).decode('utf-8')
+                    logger.info(f"Downloaded image from URL: {len(image_data)} bytes")
+                except Exception as e:
+                    error_str = str(e)
+                    if "URL too long" in error_str or "too long" in error_str.lower():
+                        logger.error(f"Image URL is too long to download: {len(image_url)} characters")
+                        state["error_message"] = "Image URL is too long. Please try uploading the image again or use a different image."
+                    else:
+                        logger.error(f"Failed to download image: {e}")
+                        state["error_message"] = f"Failed to download image: {str(e)}"
+                    return state
+            
+            # Create edit prompt based on edit type
+            edit_prompts = {
+                "enhance": "Enhance this image: improve sharpness, clarity, and overall quality while maintaining the original composition and colors.",
+                "cleanup": "Clean up this image: remove noise, artifacts, and imperfections while preserving all important details.",
+                "remove_background": "Remove the background from this image, keeping only the main subject with a transparent background.",
+                "change_background": f"Change the background of this image. {edit_instructions if edit_instructions else 'Use a clean, professional background that complements the main subject.'}",
+                "color_correction": "Apply professional color correction: adjust brightness, contrast, saturation, and white balance for optimal visual appeal.",
+                "add_filter": f"Apply a professional filter to this image. {edit_instructions if edit_instructions else 'Enhance the mood and style while maintaining natural appearance.'}",
+                "crop": f"Crop this image. {edit_instructions if edit_instructions else 'Use optimal composition and framing.'}",
+                "revisualize": f"Recreate this image with improvements. {edit_instructions if edit_instructions else 'Maintain the core subject and composition while enhancing visual quality.'}",
+                "sharpen": "Sharpen this image: enhance edge definition and clarity while avoiding over-sharpening artifacts.",
+                "fix_colors": "Fix colors in this image: correct white balance, adjust color temperature, and ensure natural skin tones if applicable."
+            }
+            
+            edit_prompt = edit_prompts.get(edit_type, edit_instructions or "Enhance this image professionally.")
+            
+            # Initialize Gemini
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if not gemini_api_key:
+                state["error_message"] = "Image editing not available - GEMINI_API_KEY not set"
+                return state
+            
+            # Configure Gemini API (matching media_agent pattern)
+            genai.configure(api_key=gemini_api_key)
+            gemini_model = 'gemini-2.5-flash-image-preview'
+            
+            # Create contents for Gemini
+            contents = [
+                {"text": edit_prompt},
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": base64_image
+                    }
+                }
+            ]
+            
+            # Generate edited image using Gemini
+            logger.info(f"Calling Gemini model: {gemini_model} for image editing")
+            logger.info(f"Edit type: {edit_type}")
+            logger.info(f"Image size: {len(image_data)} bytes")
+            
+            try:
+                response = genai.GenerativeModel(gemini_model).generate_content(
+                    contents=contents,
+                )
+                
+                logger.info(f"Gemini response received: {len(response.candidates) if response.candidates else 0} candidates")
+                
+                # Extract image from response
+                if not response.candidates or not response.candidates[0].content:
+                    raise Exception("No image returned from Gemini - no candidates in response")
+                
+                edited_image_data = None
+                candidate = response.candidates[0]
+                
+                # Check all parts for image data
+                for i, part in enumerate(candidate.content.parts):
+                    logger.info(f"Checking part {i}: inline_data={part.inline_data is not None if hasattr(part, 'inline_data') else False}")
+                    if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
+                        # Gemini may return bytes or base64 string
+                        image_data_raw = part.inline_data.data
+                        if isinstance(image_data_raw, bytes):
+                            edited_image_data = image_data_raw
+                        else:
+                            # If it's base64 string, decode it
+                            edited_image_data = base64.b64decode(image_data_raw)
+                        logger.info(f"Found image data in part {i}: {len(edited_image_data)} bytes")
+                        break
+                    elif hasattr(part, 'text') and part.text:
+                        logger.warning(f"Part {i} contains text instead of image: {part.text[:200]}...")
+                
+                if not edited_image_data:
+                    # Try to get text response for debugging
+                    text_content = ""
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            text_content += part.text
+                    logger.error(f"No image data found. Gemini text response: {text_content[:500]}...")
+                    raise Exception(f"No image data in Gemini response. Response: {text_content[:200]}")
+                    
+            except Exception as gemini_error:
+                error_str = str(gemini_error)
+                logger.error(f"Gemini API error: {error_str}")
+                
+                # Check for specific error types
+                if "API key" in error_str.lower() or "authentication" in error_str.lower():
+                    state["error_message"] = "Gemini API authentication failed. Please check GEMINI_API_KEY."
+                    return state
+                elif "quota" in error_str.lower() or "limit" in error_str.lower():
+                    state["error_message"] = "Gemini API quota exceeded. Please try again later."
+                    return state
+                else:
+                    state["error_message"] = f"Failed to edit image with Gemini: {error_str}"
+                    return state
+            
+            # Upload edited image to Supabase
+            filename = f"custom_content_{user_id}_{platform}_{uuid.uuid4().hex[:8]}_edited.jpg"
+            bucket_name = "user-uploads"
+            
+            storage_response = self.supabase.storage.from_(bucket_name).upload(
+                filename,
+                edited_image_data,
+                file_options={"content-type": "image/jpeg"}
+            )
+            
+            if hasattr(storage_response, 'error') and storage_response.error:
+                raise Exception(f"Storage upload failed: {storage_response.error}")
+            
+            edited_image_url = self.supabase.storage.from_(bucket_name).get_public_url(filename)
+            
+            # Update state with edited image
+            state["uploaded_media_url"] = edited_image_url
+            state["edited_image_url"] = edited_image_url
+            state["image_edit_type"] = edit_type
+            
+            logger.info(f"Successfully generated and uploaded edited image: {edited_image_url}")
+            
+            # Add success message
+            message = {
+                "role": "assistant",
+                "content": f"✅ Image edited successfully! The {edit_type.replace('_', ' ')} has been applied.",
+                "timestamp": datetime.now().isoformat(),
+                "has_media": True,
+                "media_url": edited_image_url,
+                "media_type": "image"
+            }
+            state["conversation_messages"].append(message)
+            
+            return state
+            
+        except Exception as e:
+            logger.error(f"Error generating edited image: {e}")
+            state["error_message"] = f"Failed to edit image: {str(e)}"
+            return state
+    
+    async def edit_image(self, state: CustomContentState) -> CustomContentState:
+        """Offer AI image editing options for Image Post - simplified to two options"""
+        try:
+            state["current_step"] = ConversationStep.EDIT_IMAGE
+            state["progress_percentage"] = 70
+            
+            # Check both uploaded and generated image URLs
+            image_url = state.get("uploaded_media_url") or state.get("generated_media_url")
+            if not image_url:
+                # No image to edit, proceed to content generation
+                state["current_step"] = ConversationStep.GENERATE_CONTENT
+                return await self.generate_content(state)
+            
+            # Check if user wants to edit with Leo (has edit prompt)
+            # This will be handled in process_user_input when user provides the edit description
+            # Don't check here - let process_user_input handle it
+            
+            # Check if user already wants to edit (has been asked for description)
+            if state.get("wants_to_edit_image"):
+                # User has selected "Edit with Leo" and we're waiting for their description
+                # Don't show the options again - just wait for their input
+                logger.info("Waiting for user's edit description")
+                return state
+            
+            # Check if we've already asked about editing
+            last_message = state["conversation_messages"][-1] if state["conversation_messages"] else None
+            edit_message_content = "Great! Your image is uploaded. Would you like to edit it with Leo before generating the caption?"
+            
+            if not last_message or edit_message_content not in last_message.get("content", ""):
+                message = {
+                    "role": "assistant",
+                    "content": edit_message_content,
+                    "timestamp": datetime.now().isoformat(),
+                    "has_media": True,
+                    "media_url": image_url,
+                    "media_type": "image",
+                    "options": [
+                        {"value": "use_as_is", "label": "✅ Use as is"},
+                        {"value": "edit_with_leo", "label": "✨ Edit with Leo"}
+                    ]
+                }
+                state["conversation_messages"].append(message)
+                logger.info("Offered simplified image editing options")
+            else:
+                logger.info("Image editing message already present")
+            
+            return state
+            
+        except Exception as e:
+            logger.error(f"Error in edit_image: {e}")
+            state["error_message"] = f"Failed to offer image editing: {str(e)}"
             state["current_step"] = ConversationStep.ERROR
             return state
     
@@ -2518,7 +3632,12 @@ Return ONLY valid JSON, no markdown code blocks."""
                     image_data_url = f"data:image/{image_format};base64,{base64_image}"
                     
             except Exception as download_error:
-                logger.warning(f"Failed to download image from {image_url}, trying direct URL: {download_error}")
+                error_str = str(download_error)
+                # If it's a URL too long error, that's expected for large base64 data URLs
+                if "URL too long" in error_str or "too long" in error_str.lower():
+                    logger.debug(f"Base64 data URL too long, using direct URL for image analysis")
+                else:
+                    logger.warning(f"Failed to download image from {image_url}, trying direct URL: {download_error}")
                 # Fallback: try direct URL (might work for public URLs)
                 image_data_url = image_url
             
@@ -2634,7 +3753,96 @@ Return ONLY valid JSON, no markdown code blocks."""
         - Brand Personality: {business_context.get('brand_personality', 'Approachable and trustworthy')}
         """
         
-        if has_media and image_analysis:
+        # Determine content type category
+        content_type_lower = content_type.lower()
+        is_video = content_type_lower in ["reel", "shorts", "video"]
+        is_image_carousel = content_type_lower in ["image post", "photo", "carousel"]
+        is_text_post = content_type_lower == "text post"
+        
+        if is_video:
+            # Video content generation rules
+            enhanced_prompt = f"""
+            {base_prompt}
+            {f"\n\nIMAGE ANALYSIS:\n{image_analysis}" if has_media and image_analysis else ""}
+            
+            Requirements for Video Posts ({content_type}):
+            - Create a caption optimized for {platform}
+            - Include platform-specific hashtags (respect {platform} hashtag limits)
+            - Add a compelling call-to-action (CTA)
+            - For YouTube: Include a title optimized for SEO
+            - Make it engaging and encourage viewers to watch
+            - Reference the video script if provided
+            
+            CRITICAL INSTRUCTIONS:
+            - Return ONLY a valid JSON object
+            - Do NOT use markdown code blocks (no ```json or ```)
+            - Use these exact field names:
+            
+            {{
+              "content": "The video caption optimized for {platform}",
+              "title": "{'Video title (required for YouTube)' if platform.lower() == 'youtube' else 'Optional title'}",
+              "hashtags": ["array", "of", "platform", "specific", "hashtags"],
+              "call_to_action": "Compelling CTA to encourage engagement"
+            }}
+            """
+        elif is_image_carousel and has_media and image_analysis:
+            # Image/Carousel content generation rules
+            enhanced_prompt = f"""
+            {base_prompt}
+            
+            IMAGE ANALYSIS:
+            {image_analysis}
+            
+            Requirements for Images/Carousels ({content_type}):
+            - Create captions that work across all images (if carousel)
+            - Include platform-specific hashtags
+            - Add alt text descriptions for accessibility
+            - For carousels: Include per-slide descriptions
+            - Make it engaging and shareable
+            - Create a compelling narrative that connects images to your business
+            
+            CRITICAL INSTRUCTIONS:
+            - Return ONLY a valid JSON object
+            - Do NOT use markdown code blocks (no ```json or ```)
+            - Use these exact field names:
+            
+            {{
+              "content": "The main post caption",
+              "title": "A catchy title",
+              "hashtags": ["array", "of", "relevant", "hashtags"],
+              "call_to_action": "Suggested call to action",
+              "alt_text": "Accessibility alt text for the image(s)",
+              "per_slide_descriptions": ["Description for slide 1", "Description for slide 2"] if content_type.lower() == "carousel" else null
+            }}
+            """
+        elif is_text_post:
+            # Text post generation rules
+            enhanced_prompt = f"""
+            {base_prompt}
+            
+            Requirements for Text Posts:
+            - Generate 3 variations: Short, Medium, and Long versions
+            - Include a compelling call-to-action (CTA)
+            - Add relevant hashtags optimized for {platform}
+            - Make it engaging and shareable
+            - Optimize for {platform} character limits and best practices
+            
+            CRITICAL INSTRUCTIONS:
+            - Return ONLY a valid JSON object
+            - Do NOT use markdown code blocks (no ```json or ```)
+            - Use these exact field names:
+            
+            {{
+              "content": "The main post content (medium length version)",
+              "content_short": "Short version (concise)",
+              "content_long": "Long version (detailed)",
+              "title": "A catchy title",
+              "hashtags": ["array", "of", "relevant", "hashtags"],
+              "call_to_action": "Compelling CTA"
+            }}
+            """
+        elif has_media and image_analysis:
+            # Default image content
             enhanced_prompt = f"""
             {base_prompt}
             
@@ -2648,27 +3856,21 @@ Return ONLY valid JSON, no markdown code blocks."""
             - Match the brand voice and personality
             - Include relevant hashtags
             - Make it engaging and shareable
-            - Create a compelling narrative that connects the image to your business
-            - Use the visual elements to enhance the message
             
             CRITICAL INSTRUCTIONS:
             - Return ONLY a valid JSON object
             - Do NOT use markdown code blocks (no ```json or ```)
-            - Do NOT include any text before or after the JSON
-            - The JSON must be parseable directly
             - Use these exact field names:
             
             {{
               "content": "The main post content that references the image",
               "title": "A catchy title",
               "hashtags": ["array", "of", "relevant", "hashtags"],
-              "call_to_action": "Suggested call to action",
-              "engagement_hooks": "Ways to encourage engagement",
-              "image_caption": "A specific caption for the image",
-              "visual_elements": ["key", "visual", "elements", "to", "highlight"]
+              "call_to_action": "Suggested call to action"
             }}
             """
         else:
+            # Default text-only content
             enhanced_prompt = f"""
             {base_prompt}
             
@@ -2682,16 +3884,13 @@ Return ONLY valid JSON, no markdown code blocks."""
             CRITICAL INSTRUCTIONS:
             - Return ONLY a valid JSON object
             - Do NOT use markdown code blocks (no ```json or ```)
-            - Do NOT include any text before or after the JSON
-            - The JSON must be parseable directly
             - Use these exact field names:
             
             {{
               "content": "The main post content",
               "title": "A catchy title",
               "hashtags": ["array", "of", "relevant", "hashtags"],
-              "call_to_action": "Suggested call to action",
-              "engagement_hooks": "Ways to encourage engagement"
+              "call_to_action": "Suggested call to action"
             }}
             """
         
@@ -2888,22 +4087,7 @@ Return ONLY valid JSON, no markdown code blocks."""
             elif current_step == ConversationStep.ASK_DESCRIPTION:
                 # Store user description
                 state["user_description"] = user_input
-                # Transition to first clarification question
-                state["current_step"] = ConversationStep.ASK_CLARIFICATION_1
-            elif current_step == ConversationStep.ASK_CLARIFICATION_1:
-                # Store first clarification answer
-                state["clarification_1"] = user_input
-                # Transition to second clarification question
-                state["current_step"] = ConversationStep.ASK_CLARIFICATION_2
-            elif current_step == ConversationStep.ASK_CLARIFICATION_2:
-                # Store second clarification answer
-                state["clarification_2"] = user_input
-                # Transition to third clarification question
-                state["current_step"] = ConversationStep.ASK_CLARIFICATION_3
-            elif current_step == ConversationStep.ASK_CLARIFICATION_3:
-                # Store third clarification answer
-                state["clarification_3"] = user_input
-                # Transition to media step
+                # Transition directly to media step (clarification questions removed)
                 state["current_step"] = ConversationStep.ASK_MEDIA
                 
             elif current_step == ConversationStep.APPROVE_CAROUSEL_IMAGES:
@@ -2927,7 +4111,9 @@ Return ONLY valid JSON, no markdown code blocks."""
                 # Handle schedule selection
                 logger.info(f"Processing schedule selection with input: '{user_input}'")
                 
-                if user_input.lower().strip() in ["now", "immediately", "asap"]:
+                user_input_lower = user_input.lower().strip()
+                # Handle "Post Now" button clicks (may include emoji)
+                if user_input_lower in ["now", "immediately", "asap"] or "post now" in user_input_lower or "🚀" in user_input:
                     state["scheduled_for"] = datetime.now().isoformat()
                     logger.info(f"Set scheduled_for to now: {state['scheduled_for']}")
                 else:
@@ -2983,7 +4169,15 @@ Return ONLY valid JSON, no markdown code blocks."""
                 # Handle media confirmation
                 if user_input.lower().strip() in ["yes", "y", "correct", "proceed"]:
                     state["media_confirmed"] = True
-                    state["current_step"] = ConversationStep.GENERATE_CONTENT
+                    # For Image Post, route to edit_image
+                    # For other types, go to generate_content
+                    content_type = state.get("selected_content_type", "").lower()
+                    if content_type in ["image post", "image", "photo"]:
+                        # Route to edit_image step for Image Post
+                        state["current_step"] = ConversationStep.EDIT_IMAGE
+                        logger.info("Media confirmed for Image Post, routing to EDIT_IMAGE")
+                    else:
+                        state["current_step"] = ConversationStep.GENERATE_CONTENT
                 elif user_input.lower().strip() in ["no", "n", "incorrect", "wrong"]:
                     state["media_confirmed"] = False
                     # Clear previous media
@@ -2994,6 +4188,49 @@ Return ONLY valid JSON, no markdown code blocks."""
                     state["current_step"] = ConversationStep.ASK_MEDIA
                 else:
                     state["error_message"] = "Please respond with 'yes' to proceed or 'no' to upload a different file."
+                    
+            elif current_step == ConversationStep.EDIT_IMAGE:
+                # Handle image editing choice
+                user_input_lower = user_input.lower().strip()
+                
+                if user_input_lower in ["use_as_is", "use as is", "skip", "no", "n"]:
+                    # User wants to use image as is
+                    state["use_image_as_is"] = True
+                    state["current_step"] = ConversationStep.GENERATE_CONTENT
+                    logger.info("User chose to use image as is")
+                elif user_input_lower in ["edit_with_leo", "edit with leo", "edit", "leo"] or "edit with leo" in user_input_lower:
+                    # User wants to edit with Leo - ask for edit description
+                    state["wants_to_edit_image"] = True
+                    # Clear any previous edit prompt
+                    state.pop("image_edit_prompt", None)
+                    # Ask user to describe what they want to edit
+                    message = {
+                        "role": "assistant",
+                        "content": "Great! Describe what you'd like me to edit in your image. For example: 'Make it brighter', 'Change background to blue', 'Remove the person on the left', etc.",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    state["conversation_messages"].append(message)
+                    logger.info("Asked user for edit description")
+                elif state.get("wants_to_edit_image"):
+                    # User provided edit description - apply the edit
+                    edit_prompt = user_input.strip()
+                    if not edit_prompt:
+                        state["error_message"] = "Please describe what you'd like to edit in the image."
+                        return state
+                    
+                    # Apply natural language edit to image
+                    result = await self.generate_edited_image_with_prompt(state, edit_prompt)
+                    if result.get("error_message"):
+                        # Error occurred, stay in edit_image
+                        return result
+                    
+                    # Success - clear the flag and proceed to generate content with edited image
+                    state["wants_to_edit_image"] = False
+                    state["current_step"] = ConversationStep.GENERATE_CONTENT
+                    logger.info(f"Image edited with prompt: {edit_prompt}, proceeding to generate content")
+                    return await self.generate_content(state)
+                else:
+                    state["error_message"] = "Please select 'Use as is' or 'Edit with Leo'."
                     
             elif current_step == ConversationStep.ASK_MEDIA:
                 # Check if this is a carousel post - if so, handle carousel image source selection
@@ -3025,7 +4262,8 @@ Return ONLY valid JSON, no markdown code blocks."""
                     state["media_type"] = MediaType.IMAGE
                     state["should_generate_media"] = True
                     state["current_step"] = ConversationStep.GENERATE_CONTENT
-                    logger.info("Set to GENERATE_CONTENT for generate_image")
+                    logger.info("Set to GENERATE_CONTENT for generate_image - will generate immediately")
+                    # Don't return here - let execute_conversation_step handle it automatically
                 elif media_choice == "generate_video":
                     state["has_media"] = True
                     state["media_type"] = MediaType.VIDEO
@@ -3045,9 +4283,102 @@ Return ONLY valid JSON, no markdown code blocks."""
                     state["current_step"] = ConversationStep.GENERATE_CONTENT
                     logger.info("Set to GENERATE_CONTENT for skip_media")
                     
+            elif current_step == ConversationStep.PREVIEW_AND_EDIT:
+                # Handle preview and edit actions
+                user_input_lower = user_input.lower().strip()
+                
+                # Determine if this is an Image Post
+                content_type = state.get("selected_content_type", "").lower()
+                is_image_post = content_type in ["image post", "image", "photo"]
+                image_edit_commands = ["enhance", "remove_background", "change_background", "fix_colors", 
+                                      "sharpen", "cleanup", "add_filter", "crop", "revisualize"]
+                
+                # FIRST: Check if user wants to proceed to schedule (highest priority)
+                proceed_commands = ["proceed", "looks good", "continue", "yes", "y", "ok", "okay", "post", "post this", "schedule", "publish", "ready", "done", "save", "finalize"]
+                if any(cmd in user_input_lower for cmd in proceed_commands) or user_input_lower in proceed_commands:
+                    # User wants to proceed to schedule
+                    state["preview_confirmed"] = True
+                    # Clear any edit flags
+                    state["wants_to_edit"] = False
+                    state.pop("edit_prompt", None)
+                    # Don't change current_step here - let the graph handle the transition
+                    logger.info("User confirmed preview, will transition to SELECT_SCHEDULE")
+                elif user_input_lower.startswith("switch_version:") or "switch to version" in user_input_lower:
+                    # User wants to switch to a specific version
+                    content_history = state.get("content_history", [])
+                    if not content_history:
+                        logger.warning("No content history available")
+                    else:
+                        # Extract version number
+                        version_num = None
+                        if user_input_lower.startswith("switch_version:"):
+                            try:
+                                version_num = int(user_input_lower.split("switch_version:")[1].strip())
+                            except (ValueError, IndexError):
+                                logger.warning(f"Invalid version number in input: {user_input}")
+                        elif "switch to version" in user_input_lower:
+                            try:
+                                parts = user_input_lower.split("switch to version")
+                                version_num = int(parts[1].strip()) if len(parts) > 1 else None
+                            except (ValueError, IndexError):
+                                logger.warning(f"Invalid version number in input: {user_input}")
+                        
+                        if version_num:
+                            # Find version in history (version numbers are 1-indexed)
+                            version_index = None
+                            for idx, version in enumerate(content_history):
+                                if version.get("version") == version_num:
+                                    version_index = idx
+                                    break
+                            
+                            if version_index is not None:
+                                # Switch to this version
+                                selected_version = content_history[version_index]
+                                state["current_content_version"] = version_index
+                                state["generated_content"] = selected_version["content"].copy()
+                                
+                                # Update is_current flags
+                                for i, version in enumerate(content_history):
+                                    version["is_current"] = (i == version_index)
+                                
+                                # Mark that version was switched - this will refresh preview
+                                state["version_switched"] = True
+                                state["preview_confirmed"] = False  # Reset preview confirmation
+                                
+                                logger.info(f"Switched to version {version_num} (index {version_index})")
+                            else:
+                                logger.warning(f"Version {version_num} not found in history")
+                        else:
+                            logger.warning("Could not extract version number from input")
+                # SECOND: Check if this is an image editing command (for Image Post)
+                elif user_input_lower in image_edit_commands and is_image_post:
+                    # User wants to edit the image
+                    edit_type = user_input_lower
+                    state["wants_to_edit_image"] = True
+                    state["image_edit_type"] = edit_type
+                    # Generate edited image
+                    result = await self.generate_edited_image(state, edit_type)
+                    if result.get("error_message"):
+                        # Error occurred, stay in preview
+                        return result
+                    # Success - regenerate content with edited image
+                    state["current_step"] = ConversationStep.GENERATE_CONTENT
+                    logger.info(f"Image edited with type: {edit_type}, regenerating content")
+                elif user_input_lower in ["edit", "change", "modify"]:
+                    # User wants to edit - this will be handled by showing edit input in frontend
+                    state["wants_to_edit"] = True
+                    # Don't change step - stay in preview to show edit input
+                else:
+                    # Assume it's an edit prompt (natural language)
+                    state["wants_to_edit"] = True
+                    state["edit_prompt"] = user_input
+                    # Store the edit prompt for apply_content_edit
+                    logger.info(f"Received edit prompt: {user_input}")
+                    
             elif current_step == ConversationStep.ASK_ANOTHER_CONTENT:
                 # Handle another content choice
-                if user_input.lower().strip() in ["yes", "y", "create", "another", "generate"]:
+                user_input_lower = user_input.lower().strip()
+                if user_input_lower in ["yes", "y", "create", "another", "generate", "create another post"]:
                     # Reset state for new content generation
                     state["current_step"] = ConversationStep.ASK_PLATFORM
                     state["progress_percentage"] = 0
@@ -3067,10 +4398,21 @@ Return ONLY valid JSON, no markdown code blocks."""
                     state.pop("scheduled_for", None)
                     state.pop("content_confirmed", None)
                     state.pop("media_confirmed", None)
+                    state.pop("preview_confirmed", None)
                     state.pop("is_complete", None)
-                elif user_input.lower().strip() in ["no", "n", "done", "exit", "finish"]:
-                    # Mark as complete to exit
+                    state.pop("content_history", None)
+                    state.pop("current_content_version", None)
+                    state.pop("wants_to_edit", None)
+                    state.pop("edit_prompt", None)
+                    state.pop("edited_image_url", None)
+                    state.pop("image_edit_type", None)
+                    state.pop("use_image_as_is", None)
+                    state.pop("wants_to_edit_image", None)
+                    logger.info("User wants to create another post - resetting state")
+                elif user_input_lower in ["no", "n", "done", "exit", "finish", "i'm done for now", "done for now"]:
+                    # Mark as complete to exit - flow breaks here
                     state["is_complete"] = True
+                    logger.info("User is done - marking conversation as complete")
                 else:
                     state["error_message"] = "Please respond with 'yes' to create another content or 'no' to finish."
             
@@ -3374,6 +4716,11 @@ Return ONLY valid JSON, no markdown code blocks."""
         if current_step == ConversationStep.GENERATE_SCRIPT:
             return "generate_script"
         
+        # If Text Post, skip media and go directly to content generation
+        content_type = state.get("selected_content_type", "")
+        if content_type and content_type.lower() == "text post":
+            return "skip"
+        
         if state.get("has_media", False):
             if state.get("should_generate_media", False):
                 return "generate"
@@ -3394,26 +4741,43 @@ Return ONLY valid JSON, no markdown code blocks."""
         if state.get("current_step") == ConversationStep.ERROR:
             return "error"
         
-        # Check if user confirmed media or if there was an error
+        # Check if user wants to edit image (for Image Post)
+        if state.get("wants_to_edit_image", False):
+            state["wants_to_edit_image"] = False  # Reset flag
+            return "edit_image"
+        
+        # Check if user confirmed media
         if state.get("media_confirmed", False):
+            # For Image Post, check if we should offer editing
+            content_type = state.get("selected_content_type", "").lower()
+            media_type = state.get("media_type", "")
+            if content_type in ["image post", "image", "photo"] and str(media_type).lower() == "image":
+                # Check if user selected "use as is" or wants to edit
+                if state.get("use_image_as_is", False):
+                    return "proceed"
+                # Default: offer editing for Image Post
+                return "edit_image"
             return "proceed"
         elif state.get("validation_errors"):
             return "retry"
         else:
             return "proceed"  # Default to proceed if no explicit confirmation
     
-    def _should_proceed_after_content(self, state: CustomContentState) -> str:
-        """Determine next step after content confirmation"""
+    def _should_proceed_after_preview(self, state: CustomContentState) -> str:
+        """Determine next step after preview and edit"""
         if state.get("current_step") == ConversationStep.ERROR:
             return "error"
         
-        # Check if user confirmed content or if there was an error
-        if state.get("content_confirmed", False):
+        # Check if user wants to proceed to schedule
+        if state.get("preview_confirmed", False):
             return "proceed"
-        elif state.get("content_confirmed") is False:
-            return "retry"
-        else:
-            return "proceed"  # Default to proceed if no explicit confirmation
+        
+        # Check if user wants to edit (will be set in process_user_input)
+        if state.get("wants_to_edit", False):
+            return "edit"  # Stay in preview mode to show edit input or apply edit
+        
+        # Default: stay in preview (waiting for user action)
+        return "edit"  # This will loop back to preview_and_edit
     
     def get_user_platforms(self, user_id: str) -> List[str]:
         """Get user's connected platforms from their profile"""
@@ -3450,6 +4814,12 @@ Return ONLY valid JSON, no markdown code blocks."""
                 logger.info(f"Processing user input: '{user_input}'")
                 state = await self.process_user_input(state, user_input, "text")
                 logger.info(f"After processing input, current_step: {state.get('current_step')}")
+                
+                # If process_user_input set current_step to GENERATE_CONTENT (for image generation),
+                # automatically continue to execute it without waiting for another user input
+                if state.get("current_step") == ConversationStep.GENERATE_CONTENT and state.get("should_generate_media", False):
+                    logger.info("Image generation triggered - automatically executing generate_content")
+                    # Continue to execute the GENERATE_CONTENT step below
             
             # If there's an error, try to recover if user provided meaningful input
             if state.get("current_step") == ConversationStep.ERROR:
@@ -3509,12 +4879,14 @@ Return ONLY valid JSON, no markdown code blocks."""
                 result = await self.ask_content_type(state)
             elif current_step == ConversationStep.ASK_DESCRIPTION:
                 result = await self.ask_description(state)
-            elif current_step == ConversationStep.ASK_CLARIFICATION_1:
-                result = await self.ask_clarification_1(state)
-            elif current_step == ConversationStep.ASK_CLARIFICATION_2:
-                result = await self.ask_clarification_2(state)
-            elif current_step == ConversationStep.ASK_CLARIFICATION_3:
-                result = await self.ask_clarification_3(state)
+            elif current_step == ConversationStep.PREVIEW_AND_EDIT:
+                # Check if preview is confirmed - if so, transition to select_schedule
+                if state.get("preview_confirmed", False):
+                    logger.info("Preview confirmed, transitioning to SELECT_SCHEDULE")
+                    state["current_step"] = ConversationStep.SELECT_SCHEDULE
+                    result = await self.select_schedule(state)
+                else:
+                    result = await self.preview_and_edit(state)
             elif current_step == ConversationStep.ASK_MEDIA:
                 result = await self.ask_media(state)
             elif current_step == ConversationStep.GENERATE_SCRIPT:
@@ -3543,6 +4915,19 @@ Return ONLY valid JSON, no markdown code blocks."""
             elif current_step == ConversationStep.GENERATE_CONTENT:
                 try:
                     result = await self.generate_content(state)
+                    # generate_content calls preview_and_edit internally, but if it didn't transition,
+                    # ensure we continue to preview_and_edit
+                    # After generate_content, if it transitioned to PREVIEW_AND_EDIT, automatically continue
+                    # This ensures preview is shown without waiting for another user input
+                    if result.get("current_step") == ConversationStep.PREVIEW_AND_EDIT:
+                        logger.info("Content generated, checking if preview message exists")
+                        # Check if preview message is already in conversation_messages
+                        has_preview_message = any(msg.get("preview_mode") for msg in result.get("conversation_messages", []))
+                        if has_preview_message:
+                            logger.info("Preview message already exists, preview should be displayed")
+                        else:
+                            logger.info("Preview message not found, calling preview_and_edit to add it")
+                            result = await self.preview_and_edit(result)
                 except Exception as e:
                     logger.error(f"Error in generate_content step: {e}")
                     # Don't set to ERROR - continue with content generation without images
@@ -3561,37 +4946,48 @@ Return ONLY valid JSON, no markdown code blocks."""
             elif current_step == ConversationStep.CONFIRM_CONTENT:
                 result = await self.confirm_content(state)
             elif current_step == ConversationStep.SELECT_SCHEDULE:
-                # Only call select_schedule if we haven't already asked for schedule
-                # Check if we already have a schedule selection message
-                last_message = state["conversation_messages"][-1] if state["conversation_messages"] else None
-                schedule_message_content = "Great! Now let's schedule your post. Please select the date and time when you'd like this content to be published. You can choose to post immediately or schedule it for later."
-                
-                logger.info(f"SELECT_SCHEDULE step - last_message: {last_message}")
-                logger.info(f"SELECT_SCHEDULE step - checking for message content")
-                
-                if not last_message or schedule_message_content not in last_message.get("content", ""):
-                    logger.info("Calling select_schedule method")
-                    result = await self.select_schedule(state)
-                else:
-                    # Already asked for schedule, just return current state
-                    logger.info("Schedule message already present, returning current state")
+                # Check if user has already selected a schedule (scheduled_for is set)
+                if state.get("scheduled_for"):
+                    # User has already selected schedule, transition to save_content
+                    logger.info(f"Schedule already selected: {state.get('scheduled_for')}, transitioning to SAVE_CONTENT")
+                    state["current_step"] = ConversationStep.SAVE_CONTENT
                     result = state
+                else:
+                    # Only call select_schedule if we haven't already asked for schedule
+                    # Check if we already have a schedule selection message
+                    last_message = state["conversation_messages"][-1] if state["conversation_messages"] else None
+                    # Don't add schedule message - UI will handle it
+                    logger.info(f"SELECT_SCHEDULE step - UI will handle display")
+                    # Call select_schedule to set the step, but it won't add a message
+                    result = await self.select_schedule(state)
+            elif current_step == ConversationStep.EDIT_IMAGE:
+                result = await self.edit_image(state)
             elif current_step == ConversationStep.SAVE_CONTENT:
                 result = await self.save_content(state)
                 # After saving content, automatically transition to ask_another_content
                 if result.get("current_step") == ConversationStep.ASK_ANOTHER_CONTENT:
                     result = await self.ask_another_content(result)
             elif current_step == ConversationStep.ASK_ANOTHER_CONTENT:
-                # Only call ask_another_content if we haven't already asked
-                # Check if we already have an ask another content message
-                last_message = state["conversation_messages"][-1] if state["conversation_messages"] else None
-                another_content_message = "Would you like to create another piece of content? Just let me know!"
-                
-                if not last_message or another_content_message not in last_message.get("content", ""):
-                    result = await self.ask_another_content(state)
-                else:
-                    # Already asked about another content, just return current state
+                # Check if user has already responded (processed in process_user_input)
+                # If user wants to create another, current_step will be ASK_PLATFORM
+                # If user is done, is_complete will be True
+                if state.get("current_step") == ConversationStep.ASK_PLATFORM:
+                    # User wants to create another - transition to platform selection
+                    result = await self.ask_platform(state)
+                elif state.get("is_complete", False):
+                    # User is done - return state as is (will end conversation)
                     result = state
+                else:
+                    # Only call ask_another_content if we haven't already asked
+                    # Check if we already have an ask another content message
+                    last_message = state["conversation_messages"][-1] if state["conversation_messages"] else None
+                    another_content_message = "Your post has been saved to the schedule section! 🎉\n\nWant to create another post or are you done for now?"
+                    
+                    if not last_message or another_content_message not in last_message.get("content", ""):
+                        result = await self.ask_another_content(state)
+                    else:
+                        # Already asked about another content, just return current state
+                        result = state
             elif current_step == ConversationStep.DISPLAY_RESULT:
                 result = await self.display_result(state)
             elif current_step == ConversationStep.ERROR:
@@ -3599,6 +4995,15 @@ Return ONLY valid JSON, no markdown code blocks."""
             else:
                 # Default to current state if step is not recognized
                 result = state
+            
+            # After executing any step, if result has current_step = PREVIEW_AND_EDIT but no preview message exists,
+            # automatically call preview_and_edit to add the preview message
+            # This ensures preview is shown immediately after content generation without waiting for user input
+            if result.get("current_step") == ConversationStep.PREVIEW_AND_EDIT:
+                has_preview_msg = any(msg.get("preview_mode") for msg in result.get("conversation_messages", []))
+                if not has_preview_msg:
+                    logger.info("No preview message found after step execution, automatically calling preview_and_edit")
+                    result = await self.preview_and_edit(result)
             
             return result
             

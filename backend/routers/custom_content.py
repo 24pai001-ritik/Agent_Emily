@@ -243,7 +243,12 @@ async def process_user_input(
             if latest_message.get("all_scripts"):
                 logger.info(f"✅ Returning message with {len(latest_message['all_scripts'])} scripts in all_scripts")
         else:
-            logger.warning(f"⚠️ Returning message without script")
+            # This is normal for non-video content types (Image Post, Text Post, etc.)
+            content_type = result.get("selected_content_type", "")
+            if content_type and content_type.lower() not in ["reel", "shorts", "video"]:
+                logger.debug(f"ℹ️ Returning message without script (normal for {content_type})")
+            else:
+                logger.debug(f"ℹ️ Returning message without script")
         
         return {
             "conversation_id": conversation_id,
