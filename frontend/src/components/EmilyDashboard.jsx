@@ -573,15 +573,6 @@ function EmilyDashboard() {
               </div>
               
               <div className="flex items-center gap-2">
-                {/* Refresh Chat Button */}
-                <button
-                  onClick={handleRefreshChat}
-                  className="p-2 rounded-md hover:bg-purple-50 transition-colors border border-purple-200 bg-purple-50"
-                  title="Refresh Chat - Reset conversation and clear intent state"
-                >
-                  <RefreshCw className="w-5 h-5 text-purple-600" />
-                </button>
-                
                 {/* WhatsApp Message Button */}
                 <button
                   onClick={() => setShowWhatsAppModal(true)}
@@ -643,6 +634,7 @@ function EmilyDashboard() {
                     useV2={true}
                     onOpenCustomContent={() => setShowCustomContentChatbot(true)}
                     isModalOpen={showCustomContentChatbot}
+                    onRefreshChat={handleRefreshChat}
                   />
                 </div>
               </div>

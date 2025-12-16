@@ -118,8 +118,23 @@ async def _handle_social_media_async(payload: Optional[Any], user_id: str) -> Di
         
         if payload.media == "upload" and payload.media_file:
             has_media = True
-            media_url = payload.media_file
-            media_type = "image"
+            # Upload the media file to content_images bucket
+            try:
+                uploaded_url = await _upload_media_to_content_images(payload.media_file, user_id)
+                if uploaded_url:
+                    media_url = uploaded_url
+                    logger.info(f"✅ Uploaded media to content_images bucket: {media_url}")
+                else:
+                    # Fallback to original URL if upload fails
+                    media_url = payload.media_file
+                    logger.warning(f"⚠️ Failed to upload media to content_images, using original URL: {media_url}")
+            except Exception as e:
+                logger.error(f"Error uploading media to content_images: {e}")
+                # Fallback to original URL
+                media_url = payload.media_file
+                logger.warning(f"Using original media URL as fallback: {media_url}")
+            
+            media_type = "image"  # Default to image, can be enhanced to detect video
             # Analyze image if available
             try:
                 image_analysis = asyncio.run(_analyze_uploaded_image(media_url, user_description, business_context))
@@ -522,6 +537,87 @@ def _extract_hashtags(text: str) -> List[str]:
     """Extract hashtags from text"""
     hashtags = re.findall(r'#\w+', text)
     return hashtags[:10]  # Limit to 10 hashtags
+
+async def _upload_media_to_content_images(media_url: str, user_id: str) -> Optional[str]:
+    """Upload media file from URL to content_images bucket"""
+    try:
+        import httpx
+        import uuid
+        from datetime import datetime
+        
+        if not supabase:
+            logger.error("Supabase client not initialized")
+            return None
+        
+        logger.info(f"📤 Downloading media from URL: {media_url}")
+        
+        # Download the file
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(media_url)
+            response.raise_for_status()
+            file_content = response.content
+            content_type = response.headers.get("content-type", "image/jpeg")
+        
+        logger.info(f"✅ Downloaded media: {len(file_content)} bytes, type: {content_type}")
+        
+        # Determine file extension from content type or URL
+        file_ext = "png"
+        if "image/jpeg" in content_type or "image/jpg" in content_type:
+            file_ext = "jpg"
+        elif "image/png" in content_type:
+            file_ext = "png"
+        elif "image/gif" in content_type:
+            file_ext = "gif"
+        elif "image/webp" in content_type:
+            file_ext = "webp"
+        elif "video/" in content_type:
+            file_ext = "mp4"
+        else:
+            # Try to extract from URL
+            if ".jpg" in media_url.lower() or ".jpeg" in media_url.lower():
+                file_ext = "jpg"
+            elif ".png" in media_url.lower():
+                file_ext = "png"
+            elif ".gif" in media_url.lower():
+                file_ext = "gif"
+            elif ".webp" in media_url.lower():
+                file_ext = "webp"
+            elif ".mp4" in media_url.lower():
+                file_ext = "mp4"
+        
+        # Generate filename
+        filename = f"{user_id}_{uuid.uuid4().hex[:8]}.{file_ext}"
+        file_path = f"uploaded/{filename}"
+        
+        logger.info(f"📤 Uploading to content_images bucket: {file_path}")
+        
+        # Upload to content_images bucket
+        storage_response = supabase.storage.from_("content_images").upload(
+            file_path,
+            file_content,
+            file_options={"content-type": content_type, "upsert": "false"}
+        )
+        
+        if hasattr(storage_response, 'error') and storage_response.error:
+            logger.error(f"Storage upload error: {storage_response.error}")
+            return None
+        
+        # Get public URL
+        public_url = supabase.storage.from_("content_images").get_public_url(file_path)
+        
+        if not public_url or not isinstance(public_url, str):
+            logger.error(f"Invalid public URL returned: {public_url}")
+            return None
+        
+        logger.info(f"✅ Media uploaded successfully to content_images bucket")
+        logger.info(f"   File path: {file_path}")
+        logger.info(f"   Public URL: {public_url}")
+        
+        return public_url
+        
+    except Exception as e:
+        logger.error(f"Error uploading media to content_images bucket: {e}", exc_info=True)
+        return None
 
 async def _generate_image_for_content(user_id: str, title: str, content: str, 
                                      platform: str, content_type: str, 

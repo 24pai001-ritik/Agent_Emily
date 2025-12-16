@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useNotifications } from '../contexts/NotificationContext'
 import { supabase } from '../lib/supabase'
-import { Send, User, Mic, Sparkles, Bot, Copy, Reply, Trash2, Heart, MessageCircle, Share2, Bookmark, MoreHorizontal } from 'lucide-react'
+import { Send, User, Mic, Sparkles, Bot, Copy, Reply, Trash2, Heart, MessageCircle, Share2, Bookmark, MoreHorizontal, RefreshCw, Instagram, Facebook, Linkedin, Youtube, Twitter } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -23,7 +23,7 @@ const getApiBaseUrl = () => {
 }
 const API_BASE_URL = getApiBaseUrl().replace(/\/$/, '')
 
-const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 'idle', onSpeakingChange, messageFilter = 'all', useV2 = false }, ref) => {
+const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 'idle', onSpeakingChange, messageFilter = 'all', useV2 = false, onRefreshChat = null }, ref) => {
   const { user } = useAuth()
   const { showError, showSuccess } = useNotifications()
   const navigate = useNavigate()
@@ -47,6 +47,7 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
   const inputRecognitionRef = useRef(null)
   const isSelectingTextRef = useRef(false)
   const mouseDownTimeRef = useRef(0)
+  const fileInputRef = useRef(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "auto" })
@@ -94,9 +95,9 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
   useEffect(() => {
     // Use a small delay to ensure the component is fully rendered
     const timer = setTimeout(() => {
-      if (inputRef.current && !isCallActive && !isModalOpen()) {
-        inputRef.current.focus()
-      }
+    if (inputRef.current && !isCallActive && !isModalOpen()) {
+      inputRef.current.focus()
+    }
     }, 100)
     
     return () => clearTimeout(timer)
@@ -136,7 +137,7 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
       
       // If clicking anywhere except our input, refocus immediately
       if (target !== inputRef.current && !inputRef.current?.contains(target)) {
-        setTimeout(() => {
+          setTimeout(() => {
           if (inputRef.current) {
             inputRef.current.focus()
           }
@@ -822,7 +823,7 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
 
       // Declare options at function scope so it's accessible in catch block
       let options = null
-      
+
       // Handle non-streaming response (when in call)
       if (isCallActive && callStatus === 'connected') {
         const data = await response.json()
@@ -846,22 +847,22 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
         }
       } else {
         // Handle streaming response (normal mode)
-        const reader = response.body?.getReader()
-        const decoder = new TextDecoder()
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
 
-        if (!reader) {
-          throw new Error('No response body reader available')
-        }
+      if (!reader) {
+        throw new Error('No response body reader available')
+      }
 
-        let buffer = ''
-        let isDone = false
+      let buffer = ''
+      let isDone = false
         let finalContentData = null
 
-        while (!isDone) {
-          const { done, value } = await reader.read()
-          
-          if (done) {
-            isDone = true
+      while (!isDone) {
+        const { done, value } = await reader.read()
+        
+        if (done) {
+          isDone = true
             // Check final buffer for CONTENT_DATA before breaking
             if (buffer && buffer.includes('CONTENT_DATA:')) {
               try {
@@ -873,16 +874,16 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                 console.error('Error parsing final CONTENT_DATA:', e)
               }
             }
-            break
-          }
+          break
+        }
 
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
                 const rawData = line.slice(6)
                 console.log('📥 Raw SSE data received:', rawData.substring(0, 200))
                 const data = JSON.parse(rawData)
@@ -918,19 +919,19 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                     })
                   )
                 }
-                
-                if (data.done) {
-                  isDone = true
-                  setIsStreaming(false)
+              
+              if (data.done) {
+                isDone = true
+                setIsStreaming(false)
                   // If done message has content_data, use it
                   if (data.content_data) {
                     finalContentData = data.content_data
                     console.log('📷 Final done message has content_data:', data.content_data)
                   }
-                  break
-                }
-                
-                if (data.content) {
+                break
+              }
+              
+              if (data.content) {
                   // Skip if content is the OPTIONS marker (already handled above)
                   if (data.content.includes('OPTIONS:')) {
                     continue
@@ -979,45 +980,45 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                     continue
                   }
                   
-                  // Check if this is a clear progress command
-                  if (data.content.includes('---CLEAR_PROGRESS---')) {
-                    // Clear the progress messages by removing lines that look like progress
-                    setMessages(prev => 
-                        prev.map(msg => {
-                          if (msg.id === botMessageId) {
-                            const finalContent = msg.content.replace(/🔍.*?\n|📅.*?\n|🔍.*?\n|✅.*?\n|📝.*?\n|❌.*?\n|📊.*?\n|📈.*?\n|🤖.*?\n|✨.*?\n|---CLEAR_PROGRESS---.*?\n/g, '').trim()
-                            return { 
-                              ...msg, 
-                              content: finalContent,
+                // Check if this is a clear progress command
+                if (data.content.includes('---CLEAR_PROGRESS---')) {
+                  // Clear the progress messages by removing lines that look like progress
+                  setMessages(prev => 
+                      prev.map(msg => {
+                        if (msg.id === botMessageId) {
+                          const finalContent = msg.content.replace(/🔍.*?\n|📅.*?\n|🔍.*?\n|✅.*?\n|📝.*?\n|❌.*?\n|📊.*?\n|📈.*?\n|🤖.*?\n|✨.*?\n|---CLEAR_PROGRESS---.*?\n/g, '').trim()
+                          return { 
+                            ...msg, 
+                            content: finalContent,
                               isStreaming: false,
                               options: options
-                            }
                           }
-                          return msg
-                        })
-                    )
-                  } else {
-                    setMessages(prev => 
-                        prev.map(msg => {
-                          if (msg.id === botMessageId) {
+                        }
+                        return msg
+                      })
+                  )
+                } else {
+                  setMessages(prev => 
+                      prev.map(msg => {
+                        if (msg.id === botMessageId) {
                             const currentContent = msg.content || ''
                             const updatedContent = currentContent + data.content
                             return { ...msg, content: updatedContent, isStreaming: false, options: options }
-                          }
-                          return msg
-                        })
-                    )
-                  }
+                        }
+                        return msg
+                      })
+                  )
                 }
+              }
                 
                 // Handle error flag in data - but don't append to existing content
                 if (data.error) {
                   console.error('Error flag in stream data:', data)
                   // Don't modify message content if error occurs - just log it
                   // The catch block will handle actual errors
-                }
-              } catch (e) {
-                console.error('Error parsing SSE data:', e)
+              }
+            } catch (e) {
+              console.error('Error parsing SSE data:', e)
               }
             }
           }
@@ -1089,8 +1090,8 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
       // Refocus input after sending message
       setTimeout(() => {
         if (inputRef.current && !isCallActive && !isLoading && !isStreaming && !isModalOpen()) {
-          inputRef.current.focus()
-        }
+        inputRef.current.focus()
+      }
       }, 150)
     }
   }
@@ -1098,6 +1099,84 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
   const getAuthToken = async () => {
     const { data: { session } } = await supabase.auth.getSession()
     return session?.access_token
+  }
+
+  const handleFileUpload = async (file) => {
+    if (!file) return
+
+    // Validate file type - support images and videos
+    const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+    const allowedVideoTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/webm']
+    const allowedTypes = [...allowedImageTypes, ...allowedVideoTypes]
+    
+    if (!allowedTypes.includes(file.type)) {
+      showError("Invalid file type", "Please select a valid image or video file (JPEG, PNG, GIF, WebP, MP4, MOV, AVI, or WebM)")
+      return
+    }
+
+    // Validate file size (max 50MB for videos, 10MB for images)
+    const isVideo = allowedVideoTypes.includes(file.type)
+    const maxSize = isVideo ? 50 * 1024 * 1024 : 10 * 1024 * 1024 // 50MB for videos, 10MB for images
+    if (file.size > maxSize) {
+      showError("File too large", `File size must be less than ${isVideo ? '50MB' : '10MB'}`)
+      return
+    }
+
+    try {
+      setIsLoading(true)
+      const authToken = await getAuthToken()
+      if (!authToken) {
+        showError("Authentication required", "Please log in again.")
+        return
+      }
+
+      // Upload file to backend
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const response = await fetch(`${API_BASE_URL}/media/upload-media`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: formData
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Upload failed' }))
+        throw new Error(errorData.detail || 'Upload failed')
+      }
+
+      const data = await response.json()
+      if (data.success && data.url) {
+        // Send the uploaded file URL to the chatbot
+        // Format: "upload" + the URL so the backend knows it's an upload response
+        const messageToSend = `upload ${data.url}`
+        setInputMessage(messageToSend)
+        setTimeout(() => {
+          sendMessage(messageToSend)
+        }, 100)
+        showSuccess("File uploaded", "Your file has been uploaded successfully.")
+      } else {
+        throw new Error(data.detail || 'Upload failed')
+      }
+    } catch (error) {
+      console.error('File upload error:', error)
+      showError("Upload failed", error.message || "Please try again.")
+    } finally {
+      setIsLoading(false)
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
+
+  const handleFileInputChange = (e) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      handleFileUpload(file)
+    }
   }
 
   const fetchScheduledMessages = async () => {
@@ -1606,7 +1685,7 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
               <div className={`flex-shrink-0 ${message.type === 'user' ? 'order-2' : ''}`}>
                 {message.type === 'user' ? (
                   profile?.logo_url ? (
-                    <div className="w-5 h-5 md:w-8 md:h-8 rounded-full overflow-hidden backdrop-blur-md bg-pink-500/80 border border-pink-400/30 shadow-lg" style={{ boxShadow: '0 4px 16px 0 rgba(236, 72, 153, 0.3)' }}>
+                    <div className="w-5 h-5 md:w-8 md:h-8 rounded-full overflow-hidden backdrop-blur-md bg-pink-500/80 border border-pink-400/30">
                     <img 
                       src={profile.logo_url} 
                       alt="User" 
@@ -1614,7 +1693,7 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                     />
                     </div>
                   ) : (
-                    <div className="w-5 h-5 md:w-8 md:h-8 rounded-full backdrop-blur-md bg-pink-500/80 border border-pink-400/30 flex items-center justify-center shadow-lg" style={{ boxShadow: '0 4px 16px 0 rgba(236, 72, 153, 0.3)' }}>
+                    <div className="w-5 h-5 md:w-8 md:h-8 rounded-full backdrop-blur-md bg-pink-500/80 border border-pink-400/30 flex items-center justify-center">
                       <User className="w-3 h-3 md:w-5 md:h-5 text-white" />
                     </div>
                   )
@@ -1632,10 +1711,10 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
               </div>
               {/* Message Bubble */}
               <div 
-                className={`px-4 rounded-lg relative group message-bubble backdrop-blur-md ${
+                  className={`px-4 rounded-lg relative group message-bubble backdrop-blur-md ${
                   message.type === 'user'
-                    ? 'py-2 bg-pink-500/80 text-white border border-pink-400/30 user-bubble-shadow text-right'
-                    : 'py-3 bg-white/70 text-black chatbot-bubble-shadow border border-white/30 text-left'
+                      ? 'py-2 bg-pink-500/80 text-white border border-pink-400/30 text-right'
+                      : 'py-3 bg-white/70 text-black chatbot-bubble-shadow border border-white/30 text-left'
                 }`}
                 onMouseEnter={() => setHoveredMessageId(message.id)}
                 onMouseLeave={() => setHoveredMessageId(null)}
@@ -1713,8 +1792,31 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
           </div>
         )}
                 {(message.content || message.content_data) ? (
-                  <div className={`text-sm leading-relaxed prose prose-sm max-w-none ${message.type === 'user' ? 'text-right' : 'text-left'}`}>
-                    {shouldShowReadMore(message.content) && !expandedMessages.has(message.id) ? (
+                  <div className={`text-sm leading-relaxed prose prose-sm max-w-none ${message.type === 'user' ? 'text-right' : 'text-left'} ${message.content_data ? 'prose-no-bottom-margin' : ''}`}>
+                    {/* Special handling for upload messages */}
+                    {message.type === 'user' && message.content && message.content.trim().toLowerCase().startsWith('upload ') ? (
+                      <div className="flex flex-col items-end gap-2">
+                        <span className="text-white">uploaded</span>
+                        {(() => {
+                          const urlMatch = message.content.match(/upload\s+(https?:\/\/[^\s]+)/i)
+                          const imageUrl = urlMatch ? urlMatch[1] : null
+                          if (imageUrl) {
+                            return (
+                              <img
+                                src={imageUrl}
+                                alt="Uploaded"
+                                className="object-cover rounded"
+                                style={{ width: '200px', height: '200px' }}
+                                onError={(e) => {
+                                  e.target.style.display = 'none'
+                                }}
+                              />
+                            )
+                          }
+                          return null
+                        })()}
+                      </div>
+                    ) : shouldShowReadMore(message.content) && !expandedMessages.has(message.id) ? (
                       <div className="message-content-truncated">
                         <ReactMarkdown 
                           remarkPlugins={[remarkGfm]}
@@ -1924,17 +2026,44 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                     {/* Clickable Options */}
                     {/* Social Media Post Card */}
                     {message.content_data && (
-                      <div className="mt-4 max-w-lg mx-auto">
+                      <div className="mt-3 max-w-lg" style={{ transform: 'scale(0.84)', transformOrigin: 'left top', marginBottom: '-20%' }}>
                         <div className="bg-white rounded-lg border border-gray-200 shadow-lg overflow-hidden">
                           {/* Post Header */}
                           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
                             <div className="flex items-center space-x-3">
-                              <div className="w-6 h-6 md:w-10 md:h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white font-bold text-xs md:text-sm">
-                                {message.content_data.platform ? 
-                                  message.content_data.platform.charAt(0).toUpperCase() : 
-                                  'AI'
+                              {(() => {
+                                const platform = message.content_data.platform?.toLowerCase() || ''
+                                const getPlatformIcon = () => {
+                                  if (platform.includes('instagram')) {
+                                    return <Instagram className="w-6 h-6 md:w-10 md:h-10 text-pink-600" />
+                                  } else if (platform.includes('facebook')) {
+                                    return <Facebook className="w-6 h-6 md:w-10 md:h-10 text-blue-600" />
+                                  } else if (platform.includes('linkedin')) {
+                                    return <Linkedin className="w-6 h-6 md:w-10 md:h-10 text-blue-700" />
+                                  } else if (platform.includes('youtube')) {
+                                    return <Youtube className="w-6 h-6 md:w-10 md:h-10 text-red-600" />
+                                  } else if (platform.includes('twitter') || platform.includes('x')) {
+                                    return <Twitter className="w-6 h-6 md:w-10 md:h-10 text-black" />
+                                  } else if (platform.includes('pinterest')) {
+                                    return (
+                                      <svg className="w-6 h-6 md:w-10 md:h-10 text-red-600" viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.49-.09-.79-.17-2.01.03-2.87.18-.78 1.16-4.97 1.16-4.97s-.3-.6-.3-1.48c0-1.38.8-2.41 1.8-2.41.85 0 1.26.64 1.26 1.4 0 .85-.54 2.12-.82 3.3-.23.94.48 1.7 1.42 1.7 1.71 0 3.02-1.8 3.02-4.4 0-2.3-1.67-3.91-4.05-3.91-2.76 0-4.38 2.07-4.38 4.2 0 .82.32 1.7.72 2.19.08.1.09.19.07.29l-.28 1.12c-.04.16-.13.2-.3.12-1.12-.52-1.82-2.15-1.82-3.46 0-2.83 2.06-5.43 5.94-5.43 3.12 0 5.54 2.22 5.54 5.19 0 3.1-1.95 5.59-4.73 5.59-.93 0-1.8-.48-2.1-1.18l-.57 2.18c-.21.81-.78 1.83-1.16 2.45 1.19.37 2.45.57 3.78.57 5.52 0 10-4.48 10-10S17.52 2 12 2z"/>
+                                      </svg>
+                                    )
+                                  } else {
+                                    return (
+                                      <div className="w-6 h-6 md:w-10 md:h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white font-bold text-xs md:text-sm">
+                                        {platform ? platform.charAt(0).toUpperCase() : 'AI'}
+                                      </div>
+                                    )
+                                  }
                                 }
-                              </div>
+                                return (
+                                  <div className="flex items-center justify-center">
+                                    {getPlatformIcon()}
+                                  </div>
+                                )
+                              })()}
                               <div>
                                 <div className="font-semibold text-gray-900 text-sm">
                                   {message.content_data.platform ? 
@@ -2061,6 +2190,14 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                             onClick={async (e) => {
                               e.preventDefault()
                               e.stopPropagation()
+                              
+                              // Special handling for "upload" option
+                              if (option.toLowerCase() === "upload") {
+                                // Trigger file input
+                                fileInputRef.current?.click()
+                                return
+                              }
+                              
                               // Set the input message and send it
                               setInputMessage(option)
                               // Small delay to ensure state is updated
@@ -2087,10 +2224,8 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                     )}
                   </div>
                 ) : message.isStreaming ? (
-                  <div className="flex items-center space-x-1">
-                    <span className={`text-lg ${message.type === 'user' ? 'text-white' : 'text-black'}`}>.</span>
-                    <span className={`text-lg typing-dot-1 ${message.type === 'user' ? 'text-white' : 'text-black'}`}>.</span>
-                    <span className={`text-lg typing-dot-2 ${message.type === 'user' ? 'text-white' : 'text-black'}`}>.</span>
+                  <div className={`thinking-shimmer ${message.type === 'user' ? 'text-white' : 'text-gray-600'}`}>
+                    thinking...
                   </div>
                 ) : (
                   <div className="text-sm leading-relaxed prose prose-sm max-w-none">
@@ -2310,10 +2445,8 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
         {isLoading && !isStreaming && (
           <div className="flex justify-start w-full px-4">
             <div className="bg-white/70 backdrop-blur-md rounded-lg px-4 py-3 chatbot-bubble-shadow border border-white/30">
-              <div className="flex items-center space-x-1">
-                <span className="text-black text-lg">.</span>
-                <span className="text-black text-lg typing-dot-1">.</span>
-                <span className="text-black text-lg typing-dot-2">.</span>
+              <div className="thinking-shimmer text-gray-600">
+                thinking...
               </div>
             </div>
           </div>
@@ -2383,7 +2516,7 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                   }
                 }}
                 placeholder={replyingToMessage ? `Replying to: ${replyingToMessage.content.substring(0, 30)}...` : "Ask Emily..."}
-                className={`w-full px-6 py-4 bg-white/70 backdrop-blur-md border border-white/30 rounded-2xl focus:ring-0 focus:border-white/50 outline-none text-sm pr-20 placeholder:text-gray-500 resize-none overflow-y-auto shadow-lg ${replyingToMessage ? 'pt-8' : ''}`}
+                className={`w-full py-4 bg-white/70 backdrop-blur-md border border-white/30 rounded-2xl focus:ring-0 focus:border-white/50 outline-none text-sm ${onRefreshChat ? 'pl-36 pr-20' : 'px-6 pr-20'} placeholder:text-gray-500 resize-none overflow-y-auto shadow-lg ${replyingToMessage ? 'pt-8' : ''}`}
                 style={{ 
                   minHeight: '56px', 
                   maxHeight: '96px',
@@ -2395,6 +2528,25 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
                 autoFocus
               />
             </div>
+            {/* Left side - New Chat button */}
+            {onRefreshChat && (
+              <div className="absolute left-3 top-1/2 -translate-y-1/2" style={{ marginRight: '8px' }}>
+                <button 
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    onRefreshChat()
+                  }}
+                  disabled={isLoading || isStreaming}
+                  className="px-3 py-1.5 text-purple-500 hover:text-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 text-xs font-medium rounded-md border border-purple-300 hover:bg-purple-50"
+                  title="New Chat - Reset conversation and clear intent state"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  <span>New Chat</span>
+                </button>
+              </div>
+            )}
+            {/* Right side - Microphone and Send buttons */}
             <div className="absolute right-3 bottom-3 flex items-center space-x-2">
               <button 
                 onClick={handleMicClick}
@@ -2427,24 +2579,67 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
         </div>
       </div>
       
+      {/* Hidden file input for media uploads */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*,video/mp4,video/mpeg,video/quicktime,video/x-msvideo,video/webm"
+        onChange={handleFileInputChange}
+        style={{ display: 'none' }}
+      />
+      
       <style>{`
-        @keyframes typing-dot {
-          0%, 60%, 100% {
-            opacity: 0.3;
+        @keyframes shimmer {
+          0% {
+            left: -100%;
           }
-          30% {
-            opacity: 1;
+          100% {
+            left: 100%;
           }
         }
         
-        .typing-dot-1 {
-          animation: typing-dot 1.4s infinite;
-          animation-delay: 0s;
+        .thinking-shimmer {
+          position: relative;
+          display: inline-block;
+          font-size: 0.875rem;
+          font-weight: 500;
+          font-style: italic;
+          letter-spacing: 0.05em;
+          overflow: hidden;
         }
         
-        .typing-dot-2 {
-          animation: typing-dot 1.4s infinite;
-          animation-delay: 0.2s;
+        .thinking-shimmer::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: -100%;
+          width: 50%;
+          height: 100%;
+          background: linear-gradient(
+            90deg,
+            transparent,
+            rgba(255, 255, 255, 1),
+            transparent
+          );
+          animation: shimmer 2s infinite;
+        }
+        
+        .thinking-shimmer.text-white::before {
+          background: linear-gradient(
+            90deg,
+            transparent,
+            rgba(255, 255, 255, 1),
+            transparent
+          );
+        }
+        
+        .thinking-shimmer.text-gray-600::before {
+          background: linear-gradient(
+            90deg,
+            transparent,
+            rgba(255, 255, 255, 1),
+            transparent
+          );
         }
         
         @keyframes slide-in {
@@ -2475,8 +2670,8 @@ const Chatbot = React.forwardRef(({ profile, isCallActive = false, callStatus = 
           box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
         }
         
-        .user-bubble-shadow {
-          box-shadow: 0 8px 32px 0 rgba(236, 72, 153, 0.37);
+        .prose-no-bottom-margin p:last-child {
+          margin-bottom: 0 !important;
         }
         
         .line-clamp-3 {

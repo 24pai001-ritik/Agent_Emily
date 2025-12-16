@@ -1146,7 +1146,7 @@ class IntentBasedChatbot:
         if not payload.idea:
             missing.append({
                 "field": "idea",
-                "question": "What's the topic or idea for your content? (e.g., product launch, company update, tip, announcement)",
+                "question": "What would you like to share in this social media post?",
                 "options": None,
                 "priority": 3
             })
@@ -1362,14 +1362,6 @@ class IntentBasedChatbot:
         if field_info.get("options"):
             options_text = ", ".join([f"**{opt}**" for opt in field_info["options"]])
             question += f"\n\nYou can pick from: {options_text} - or just tell me what you prefer!"
-        
-        # If there are more missing fields, mention them briefly
-        if len(missing_fields) > 1:
-            remaining_count = len(missing_fields) - 1
-            if remaining_count == 1:
-                question += f"\n\n*After this, I'll just need one more quick detail from you.*"
-            else:
-                question += f"\n\n*I'll also need {remaining_count} more quick details after this, but we'll take it one step at a time!*"
         
         return question
     
@@ -1745,85 +1737,38 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
             
             # Quick check: if user just said "generate" or "upload" and we're waiting for media, set it directly
             # Also check for "draft" or "schedule" for task field
-            user_query = state.get("current_query", "").strip().lower()
+            user_query = state.get("current_query", "").strip()
+            user_query_lower = user_query.lower()
             if content_dict and content_dict.get("type") == "social_media":
                 social_media_dict = content_dict.get("social_media", {})
-                if not social_media_dict.get("media"):
-                    if user_query == "generate":
+                
+                # Check if user sent "upload {url}" format (from file upload)
+                if user_query_lower.startswith("upload ") and len(user_query) > 7:
+                    # Extract URL from "upload {url}"
+                    file_url = user_query[7:].strip()  # Remove "upload " prefix
+                    if file_url and (file_url.startswith("http://") or file_url.startswith("https://")):
+                        if "social_media" not in content_dict:
+                            content_dict["social_media"] = {}
+                        content_dict["social_media"]["media"] = "upload"
+                        content_dict["social_media"]["media_file"] = file_url
+                        partial_payload["content"] = content_dict
+                        state["partial_payload"] = partial_payload
+                        logger.info(f"Directly set media to 'upload' with file URL: {file_url}")
+                elif not social_media_dict.get("media"):
+                    if user_query_lower == "generate":
                         if "social_media" not in content_dict:
                             content_dict["social_media"] = {}
                         content_dict["social_media"]["media"] = "generate"
                         partial_payload["content"] = content_dict
                         state["partial_payload"] = partial_payload
                         logger.info("Directly set media to 'generate' from user query")
-                    elif user_query == "upload":
+                    elif user_query_lower == "upload":
                         if "social_media" not in content_dict:
                             content_dict["social_media"] = {}
                         content_dict["social_media"]["media"] = "upload"
                         partial_payload["content"] = content_dict
                         state["partial_payload"] = partial_payload
                         logger.info("Directly set media to 'upload' from user query")
-                
-                # Check if we have content (saved_content_id) and user is responding to task question
-                if social_media_dict.get("content") and not social_media_dict.get("task"):
-                    if user_query == "draft":
-                        if "social_media" not in content_dict:
-                            content_dict["social_media"] = {}
-                        content_dict["social_media"]["task"] = "draft"
-                        partial_payload["content"] = content_dict
-                        state["partial_payload"] = partial_payload
-                        logger.info("Directly set task to 'draft' from user query")
-                    elif user_query == "schedule":
-                        if "social_media" not in content_dict:
-                            content_dict["social_media"] = {}
-                        content_dict["social_media"]["task"] = "schedule"
-                        partial_payload["content"] = content_dict
-                        state["partial_payload"] = partial_payload
-                        logger.info("Directly set task to 'schedule' from user query")
-                    elif user_query == "edit":
-                        if "social_media" not in content_dict:
-                            content_dict["social_media"] = {}
-                        content_dict["social_media"]["task"] = "edit"
-                        partial_payload["content"] = content_dict
-                        state["partial_payload"] = partial_payload
-                        logger.info("Directly set task to 'edit' from user query")
-                    elif user_query == "delete" or user_query == "remove":
-                        if "social_media" not in content_dict:
-                            content_dict["social_media"] = {}
-                        content_dict["social_media"]["task"] = "delete"
-                        partial_payload["content"] = content_dict
-                        state["partial_payload"] = partial_payload
-                        logger.info("Directly set task to 'delete' from user query")
-                
-                # Check if task is "schedule" and we're waiting for date
-                if social_media_dict.get("task") == "schedule" and not social_media_dict.get("date"):
-                    # Try to parse date from user query
-                    try:
-                        from dateutil import parser as dateutil_parser
-                        # Try to parse the date/time from user query (fuzzy parsing)
-                        scheduled_datetime = dateutil_parser.parse(user_query, fuzzy=True, default=datetime.now())
-                        
-                        # Ensure the datetime is in the future
-                        if scheduled_datetime > datetime.now():
-                            # Format consistently as ISO string (ensure timezone aware)
-                            if scheduled_datetime.tzinfo is None:
-                                from datetime import timezone
-                                scheduled_datetime = scheduled_datetime.replace(tzinfo=timezone.utc)
-                            schedule_date_iso = scheduled_datetime.isoformat()
-                            
-                            if "social_media" not in content_dict:
-                                content_dict["social_media"] = {}
-                            content_dict["social_media"]["date"] = schedule_date_iso
-                            partial_payload["content"] = content_dict
-                            state["partial_payload"] = partial_payload
-                            logger.info(f"📅 Parsed and set date from user query: {schedule_date_iso}")
-                        else:
-                            logger.info(f"📅 Date detected but is in the past, will ask for new date")
-                    except ImportError:
-                        logger.warning("dateutil not available for date parsing")
-                    except Exception as date_parse_error:
-                        logger.info(f"Could not parse date from query: {date_parse_error}")
-                        # Date parsing failed, will ask again - LLM might extract it in next turn
             
             # Re-get content_dict after potential update
             content_dict = partial_payload.get("content")
@@ -1866,7 +1811,7 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
                 if not social_media_dict.get("idea"):
                     missing_fields.append({
                         "field": "idea",
-                        "question": "What would you like this content to be about? For example, are you announcing a new product, sharing a company update, giving a tip, or something else?",
+                        "question": "What would you like to share in this social media post?",
                         "options": None,
                         "priority": 3
                     })
@@ -2090,47 +2035,7 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
                     partial_payload["content"]["social_media"]["content"] = saved_content_id
                     logger.info(f"📝 Fallback: Stored saved_content_id in payload.content.social_media.content: {saved_content_id}")
                 
-                # Check if date and task are missing (priority after content generation)
-                if content_type == "social_media":
-                    social_media_dict = partial_payload.get("content", {}).get("social_media", {})
-                    
-                    # Check for missing date and task
-                    missing_fields = []
-                    
-                    if not social_media_dict.get("task"):
-                        missing_fields.append({
-                            "field": "task",
-                            "question": "Great! What would you like to do with this post? You can save it as a draft, schedule it for later, edit it, or delete it.",
-                            "options": ["draft", "schedule", "edit", "delete"],
-                            "priority": 1
-                        })
-                    
-                    # If task is "schedule", we need date
-                    if social_media_dict.get("task") == "schedule" and not social_media_dict.get("date"):
-                        missing_fields.append({
-                            "field": "date",
-                            "question": "Perfect! When would you like to schedule this post? Please provide a date and time (e.g., 'December 25, 2024 at 2:00 PM' or 'tomorrow at 10am').",
-                            "options": None,
-                            "priority": 2
-                        })
-                    
-                    # If there are missing fields, ask for them
-                    if missing_fields:
-                        # Sort by priority
-                        missing_fields.sort(key=lambda x: x.get("priority", 999))
-                        
-                        # Generate clarifying question
-                        question = self._generate_clarifying_question(missing_fields, "social_media")
-                        state["response"] = question
-                        state["needs_clarification"] = True
-                        # Store options for frontend rendering
-                        field_info = missing_fields[0]
-                        state["options"] = field_info.get("options")
-                        state["partial_payload"] = partial_payload
-                        logger.info(f"📅 Asking for missing date/task fields after content generation")
-                        logger.info(f"   Missing fields: {[f['field'] for f in missing_fields]}")
-                        return state
-                
+                # Content generation complete - task/date will be handled by posting manager
                 # All fields complete, clear partial payload
                 state["needs_clarification"] = False
                 state["partial_payload"] = None
